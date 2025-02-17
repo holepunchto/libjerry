@@ -33,6 +33,7 @@ typedef struct js_finalizer_s js_finalizer_t;
 typedef struct js_finalizer_list_s js_finalizer_list_t;
 typedef struct js_arraybuffer_header_s js_arraybuffer_header_t;
 typedef struct js_arraybuffer_attachment_s js_arraybuffer_attachment_t;
+typedef struct js_promise_rejection_s js_promise_rejection_t;
 
 struct js_platform_s {
   uv_loop_t *loop;
@@ -56,6 +57,8 @@ struct js_env_s {
   int64_t external_memory;
 
   bool destroying;
+
+  js_promise_rejection_t *promise_rejections;
 
   struct {
     js_uncaught_exception_cb uncaught_exception;
@@ -163,6 +166,12 @@ struct js_arraybuffer_attachment_s {
     js_finalizer_t finalizer;
     js_arraybuffer_backing_store_t *backing_store;
   };
+};
+
+struct js_promise_rejection_s {
+  jerry_value_t promise;
+  jerry_value_t reason;
+  js_promise_rejection_t *next;
 };
 
 struct js_threadsafe_function_s {
@@ -319,10 +328,10 @@ js_get_platform_loop(js_platform_t *platform, uv_loop_t **result) {
 }
 
 static inline void
-js__uncaught_exception(js_env_t *env, js_value_t *exception) {
+js__uncaught_exception(js_env_t *env, jerry_value_t exception) {
   int err;
 
-  jerry_value_t value = jerry_exception_value(js__value_from_abi(exception), true);
+  jerry_value_t value = jerry_exception_value(exception, true);
 
   if (env->callbacks.uncaught_exception) {
     js_handle_scope_t *scope;
@@ -345,6 +354,30 @@ js__uncaught_exception(js_env_t *env, js_value_t *exception) {
 }
 
 static inline void
+js__unhandled_rejection(js_env_t *env, jerry_value_t promise, jerry_value_t reason) {
+  int err;
+
+  if (env->callbacks.unhandled_rejection) {
+    js_handle_scope_t *scope;
+    err = js_open_handle_scope(env, &scope);
+    assert(err == 0);
+
+    env->callbacks.unhandled_rejection(
+      env,
+      js__value_to_abi(reason),
+      js__value_to_abi(promise),
+      env->callbacks.uncaught_exception_data
+    );
+
+    err = js_close_handle_scope(env, scope);
+    assert(err == 0);
+  }
+
+  jerry_value_free(promise);
+  jerry_value_free(reason);
+}
+
+static inline void
 js__run_microtasks(js_env_t *env) {
   int err;
 
@@ -358,13 +391,27 @@ js__run_microtasks(js_env_t *env) {
     value = jerry_run_jobs();
 
     if (jerry_value_is_exception(value)) {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     } else {
       break;
     }
   }
 
   jerry_value_free(value);
+
+  js_promise_rejection_t *next = env->promise_rejections;
+  js_promise_rejection_t *prev;
+
+  env->promise_rejections = NULL;
+
+  while (next) {
+    js__unhandled_rejection(env, next->promise, next->reason);
+
+    prev = next;
+    next = next->next;
+
+    free(prev);
+  }
 
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
@@ -375,46 +422,72 @@ js__error(js_env_t *env) {
   return env->exception ? js_pending_exception : js_uncaught_exception;
 }
 
+static inline js_arraybuffer_header_t *
+js__arraybuffer_header(void *buffer) {
+  return (js_arraybuffer_header_t *) ((char *) buffer - sizeof(js_arraybuffer_header_t));
+}
+
 static uint8_t *
 js__on_arraybuffer_allocate(jerry_arraybuffer_type_t type, uint32_t len, void **data, void *opaque) {
-  return jerry_heap_alloc(len);
+  uint8_t *buffer;
+
+  if (type == JERRY_ARRAYBUFFER_TYPE_SHARED_ARRAYBUFFER) {
+    js_arraybuffer_header_t *header = malloc(sizeof(js_arraybuffer_header_t) + len);
+
+    header->references = 1;
+    header->len = len;
+
+    buffer = header->data;
+  } else {
+    buffer = malloc(len);
+  }
+
+  return buffer;
 }
 
 static void
 js__on_arraybuffer_free(jerry_arraybuffer_type_t type, uint8_t *buffer, uint32_t len, void *data, void *opaque) {
-  js_env_t *env = opaque;
+  if (type == JERRY_ARRAYBUFFER_TYPE_SHARED_ARRAYBUFFER) {
+    js_arraybuffer_header_t *header = js__arraybuffer_header(buffer);
 
-  js_arraybuffer_attachment_t *attachment = data;
-
-  if (attachment == NULL) return;
-
-  switch (attachment->type) {
-  case js_arraybuffer_finalizer: {
-    js_finalizer_t *finalizer = &attachment->finalizer;
-
-    finalizer->cb(finalizer->env, finalizer->data, finalizer->hint);
-
-    break;
-  }
-
-  case js_arraybuffer_backing_store: {
-    js_arraybuffer_backing_store_t *backing_store = attachment->backing_store;
-
-    if (--backing_store->references == 0) {
-      jerry_value_free(backing_store->owner);
-
-      if (env->destroying) jerry_heap_gc(JERRY_GC_PRESSURE_LOW);
-
-      free(backing_store);
+    if (--header->references == 0) {
+      free(header);
     }
-  }
-  }
+  } else {
+    js_env_t *env = opaque;
 
-  free(attachment);
+    js_arraybuffer_attachment_t *attachment = data;
+
+    if (attachment == NULL) return;
+
+    switch (attachment->type) {
+    case js_arraybuffer_finalizer: {
+      js_finalizer_t *finalizer = &attachment->finalizer;
+
+      finalizer->cb(finalizer->env, finalizer->data, finalizer->hint);
+
+      break;
+    }
+
+    case js_arraybuffer_backing_store: {
+      js_arraybuffer_backing_store_t *backing_store = attachment->backing_store;
+
+      if (--backing_store->references == 0) {
+        jerry_value_free(backing_store->owner);
+
+        if (env->destroying) jerry_heap_gc(JERRY_GC_PRESSURE_LOW);
+
+        free(backing_store);
+      }
+    }
+    }
+
+    free(attachment);
+  }
 }
 
 static void
-js__on_promise_event(jerry_promise_event_type_t event_type, const jerry_value_t object, const jerry_value_t value, void *opaque) {
+js__on_promise_event(jerry_promise_event_type_t event_type, const jerry_value_t promise, const jerry_value_t reason, void *opaque) {
   int err;
 
   js_env_t *env = opaque;
@@ -422,19 +495,32 @@ js__on_promise_event(jerry_promise_event_type_t event_type, const jerry_value_t 
   if (env->callbacks.unhandled_rejection == NULL) return;
 
   if (event_type == JERRY_PROMISE_EVENT_REJECT_WITHOUT_HANDLER) {
-    js_handle_scope_t *scope;
-    err = js_open_handle_scope(env, &scope);
-    assert(err == 0);
+    js_promise_rejection_t *node = malloc(sizeof(js_promise_rejection_t));
 
-    env->callbacks.unhandled_rejection(
-      env,
-      js__value_to_abi(value),
-      js__value_to_abi(object),
-      env->callbacks.unhandled_rejection_data
-    );
+    node->promise = jerry_value_copy(promise);
+    node->reason = jerry_value_copy(reason);
 
-    err = js_close_handle_scope(env, scope);
-    assert(err == 0);
+    node->next = env->promise_rejections;
+
+    env->promise_rejections = node;
+  } else if (event_type == JERRY_PROMISE_EVENT_CATCH_HANDLER_ADDED) {
+    js_promise_rejection_t *next = env->promise_rejections;
+    js_promise_rejection_t *prev = NULL;
+
+    while (next) {
+      if (next->promise == promise) {
+        jerry_value_free(next->promise);
+        jerry_value_free(next->reason);
+
+        if (prev) prev->next = next->next;
+        else env->promise_rejections = next->next;
+
+        return free(next);
+      }
+
+      prev = next;
+      next = next->next;
+    }
   }
 }
 
@@ -482,6 +568,8 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
 
   jerry_arraybuffer_allocator(js__on_arraybuffer_allocate, js__on_arraybuffer_free, env);
 
+  jerry_arraybuffer_heap_allocation_limit(0);
+
   env->loop = loop;
   env->active_handles = 2;
   env->platform = platform;
@@ -494,6 +582,7 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   env->exception = 0;
   env->external_memory = 0;
   env->destroying = false;
+  env->promise_rejections = NULL;
 
   env->callbacks.uncaught_exception = NULL;
   env->callbacks.uncaught_exception_data = NULL;
@@ -747,7 +836,7 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
     if (env->depth) {
       env->exception = parsed;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(parsed));
+      js__uncaught_exception(env, parsed);
     }
 
     return js__error(env);
@@ -767,7 +856,7 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -804,7 +893,7 @@ js_create_module(js_env_t *env, const char *name, size_t len, int offset, js_val
     if (env->depth) {
       env->exception = handle;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(handle));
+      js__uncaught_exception(env, handle);
     }
 
     return js__error(env);
@@ -932,7 +1021,7 @@ js_set_module_export(js_env_t *env, js_module_t *module, js_value_t *name, js_va
     if (env->depth) {
       env->exception = exception;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(exception));
+      js__uncaught_exception(env, exception);
     }
 
     return js__error(env);
@@ -992,7 +1081,7 @@ js_instantiate_module(js_env_t *env, js_module_t *module, js_module_resolve_cb c
     if (env->depth) {
       env->exception = exception;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(exception));
+      js__uncaught_exception(env, exception);
     }
 
     return js__error(env);
@@ -1910,6 +1999,22 @@ js_create_sharedarraybuffer(js_env_t *env, size_t len, void **data, js_value_t *
 
 int
 js_create_sharedarraybuffer_with_backing_store(js_env_t *env, js_arraybuffer_backing_store_t *backing_store, void **data, size_t *len, js_value_t **result) {
+  if (env->exception) return js__error(env);
+
+  if (data) *data = backing_store->data;
+
+  if (len) *len = backing_store->len;
+
+  jerry_value_t value = jerry_shared_arraybuffer_external(backing_store->data, backing_store->len, NULL);
+
+  js_arraybuffer_header_t *header = js__arraybuffer_header(backing_store->data);
+
+  header->references++;
+
+  *result = js__value_to_abi(value);
+
+  js__attach_to_handle_scope(env, env->scope, *result);
+
   return 0;
 }
 
@@ -1955,6 +2060,12 @@ js_get_sharedarraybuffer_backing_store(js_env_t *env, js_value_t *sharedarraybuf
   backing_store->len = jerry_arraybuffer_size(js__value_from_abi(sharedarraybuffer));
   backing_store->data = jerry_arraybuffer_data(js__value_from_abi(sharedarraybuffer));
 
+  js_arraybuffer_header_t *header = js__arraybuffer_header(backing_store->data);
+
+  header->references++;
+
+  *result = backing_store;
+
   return 0;
 }
 
@@ -1963,7 +2074,15 @@ js_release_arraybuffer_backing_store(js_env_t *env, js_arraybuffer_backing_store
   // Allow continuing even with a pending exception
 
   if (--backing_store->references == 0) {
-    jerry_value_free(backing_store->owner);
+    if (backing_store->owner) {
+      jerry_value_free(backing_store->owner);
+    } else {
+      js_arraybuffer_header_t *header = js__arraybuffer_header(backing_store->data);
+
+      if (--header->references == 0) {
+        free(header);
+      }
+    }
 
     free(backing_store);
   }
@@ -2059,7 +2178,7 @@ js_coerce_to_number(js_env_t *env, js_value_t *value, js_value_t **result) {
     if (env->depth) {
       env->exception = number;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(number));
+      js__uncaught_exception(env, number);
     }
 
     return js__error(env);
@@ -2082,7 +2201,7 @@ js_coerce_to_string(js_env_t *env, js_value_t *value, js_value_t **result) {
     if (env->depth) {
       env->exception = string;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(string));
+      js__uncaught_exception(env, string);
     }
 
     return js__error(env);
@@ -2105,7 +2224,7 @@ js_coerce_to_object(js_env_t *env, js_value_t *value, js_value_t **result) {
     if (env->depth) {
       env->exception = object;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(object));
+      js__uncaught_exception(env, object);
     }
 
     return js__error(env);
@@ -2174,7 +2293,7 @@ js_instanceof(js_env_t *env, js_value_t *object, js_value_t *constructor, bool *
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -2824,7 +2943,7 @@ js_get_property_names(js_env_t *env, js_value_t *object, js_value_t **result) {
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -2856,7 +2975,7 @@ js_get_property(js_env_t *env, js_value_t *object, js_value_t *key, js_value_t *
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -2888,7 +3007,7 @@ js_has_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *result
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -2917,7 +3036,7 @@ js_set_property(js_env_t *env, js_value_t *object, js_value_t *key, js_value_t *
     if (env->depth) {
       env->exception = exception;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(exception));
+      js__uncaught_exception(env, exception);
     }
 
     return js__error(env);
@@ -2942,7 +3061,7 @@ js_delete_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *res
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -2971,7 +3090,7 @@ js_get_named_property(js_env_t *env, js_value_t *object, const char *name, js_va
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -3003,7 +3122,7 @@ js_has_named_property(js_env_t *env, js_value_t *object, const char *name, bool 
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -3032,7 +3151,7 @@ js_set_named_property(js_env_t *env, js_value_t *object, const char *name, js_va
     if (env->depth) {
       env->exception = exception;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(exception));
+      js__uncaught_exception(env, exception);
     }
 
     return js__error(env);
@@ -3057,7 +3176,7 @@ js_delete_named_property(js_env_t *env, js_value_t *object, const char *name, bo
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -3086,7 +3205,7 @@ js_get_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t **r
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -3123,7 +3242,7 @@ js_set_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t *va
     if (env->depth) {
       env->exception = exception;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(exception));
+      js__uncaught_exception(env, exception);
     }
 
     return js__error(env);
@@ -3148,7 +3267,7 @@ js_delete_element(js_env_t *env, js_value_t *object, uint32_t index, bool *resul
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -3405,7 +3524,7 @@ js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -3445,7 +3564,7 @@ js_call_function_with_checkpoint(js_env_t *env, js_value_t *receiver, js_value_t
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -3483,7 +3602,7 @@ js_new_instance(js_env_t *env, js_value_t *constructor, size_t argc, js_value_t 
     if (env->depth) {
       env->exception = value;
     } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
+      js__uncaught_exception(env, value);
     }
 
     return js__error(env);
@@ -3764,7 +3883,7 @@ int
 js_fatal_exception(js_env_t *env, js_value_t *error) {
   // Allow continuing even with a pending exception
 
-  js__uncaught_exception(env, error);
+  js__uncaught_exception(env, js__value_from_abi(error));
 
   return 0;
 }
