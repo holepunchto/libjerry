@@ -2679,11 +2679,40 @@ int
 js_get_prototype(js_env_t *env, js_value_t *object, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  *result = js__value_to_abi(jerry_object_proto(js__value_from_abi(object)));
+
+  js__attach_to_handle_scope(env, env->scope, *result);
+
   return 0;
 }
 
 int
 js_get_property_names(js_env_t *env, js_value_t *object, js_value_t **result) {
+  if (env->exception) return js__error(env);
+
+  env->depth++;
+
+  jerry_value_t value = jerry_object_keys(js__value_from_abi(object));
+
+  env->depth--;
+
+  if (jerry_value_is_exception(value)) {
+    if (env->depth) {
+      env->exception = value;
+    } else {
+      js__uncaught_exception(env, js__value_to_abi(value));
+    }
+
+    return js__error(env);
+  }
+
+  if (result == NULL) jerry_value_free(value);
+  else {
+    *result = js__value_to_abi(value);
+
+    js__attach_to_handle_scope(env, env->scope, *result);
+  }
+
   return 0;
 }
 
@@ -3284,6 +3313,39 @@ js_call_function_with_checkpoint(js_env_t *env, js_value_t *receiver, js_value_t
 
 int
 js_new_instance(js_env_t *env, js_value_t *constructor, size_t argc, js_value_t *const argv[], js_value_t **result) {
+  if (env->exception) return js__error(env);
+
+  jerry_value_t *args = malloc(argc * sizeof(jerry_value_t));
+
+  for (size_t i = 0; i < argc; i++) {
+    args[i] = js__value_from_abi(argv[i]);
+  }
+
+  env->depth++;
+
+  jerry_value_t value = jerry_construct(js__value_from_abi(constructor), args, argc);
+
+  free(args);
+
+  env->depth--;
+
+  if (jerry_value_is_exception(value)) {
+    if (env->depth) {
+      env->exception = value;
+    } else {
+      js__uncaught_exception(env, js__value_to_abi(value));
+    }
+
+    return js__error(env);
+  }
+
+  if (result == NULL) jerry_value_free(value);
+  else {
+    *result = js__value_to_abi(value);
+
+    js__attach_to_handle_scope(env, env->scope, *result);
+  }
+
   return 0;
 }
 
