@@ -1,4 +1,6 @@
 #include <assert.h>
+#include <intrusive.h>
+#include <intrusive/list.h>
 #include <jerryscript-core.h>
 #include <jerryscript-port.h>
 #include <jerryscript-types.h>
@@ -34,6 +36,37 @@ typedef struct js_finalizer_list_s js_finalizer_list_t;
 typedef struct js_arraybuffer_header_s js_arraybuffer_header_t;
 typedef struct js_arraybuffer_attachment_s js_arraybuffer_attachment_t;
 typedef struct js_promise_rejection_s js_promise_rejection_t;
+typedef struct js_teardown_task_s js_teardown_task_t;
+typedef struct js_teardown_queue_s js_teardown_queue_t;
+
+struct js_deferred_teardown_s {
+  js_env_t *env;
+};
+
+struct js_teardown_task_s {
+  enum {
+    js_immediate_teardown,
+    js_deferred_teardown,
+  } type;
+
+  union {
+    struct {
+      js_teardown_cb cb;
+    } immediate;
+
+    struct {
+      js_deferred_teardown_t handle;
+      js_deferred_teardown_cb cb;
+    } deferred;
+  };
+
+  void *data;
+  intrusive_list_node_t list;
+};
+
+struct js_teardown_queue_s {
+  intrusive_list_t tasks;
+};
 
 struct js_platform_s {
   uv_loop_t *loop;
@@ -43,7 +76,10 @@ struct js_env_s {
   uv_loop_t *loop;
   uv_prepare_t prepare;
   uv_check_t check;
+  uv_async_t teardown;
   int active_handles;
+
+  uint32_t refs;
 
   js_platform_t *platform;
   js_handle_scope_t *scope;
@@ -59,6 +95,8 @@ struct js_env_s {
   bool destroying;
 
   js_promise_rejection_t *promise_rejections;
+
+  js_teardown_queue_t teardown_queue;
 
   struct {
     js_uncaught_exception_cb uncaught_exception;
@@ -143,6 +181,9 @@ struct js_callback_info_s {
   jerry_length_t argc;
 };
 
+struct js_threadsafe_function_s {
+};
+
 struct js_arraybuffer_header_s {
   atomic_int references;
   jerry_length_t len;
@@ -172,9 +213,6 @@ struct js_promise_rejection_s {
   jerry_value_t promise;
   jerry_value_t reason;
   js_promise_rejection_t *next;
-};
-
-struct js_threadsafe_function_s {
 };
 
 static thread_local jerry_context_t *jerry_context = NULL;
@@ -559,6 +597,36 @@ js__check_liveness(js_env_t *env) {
   assert(err == 0);
 }
 
+static void
+js__on_handle_close(uv_handle_t *handle) {
+  js_env_t *env = (js_env_t *) handle->data;
+
+  if (--env->active_handles == 0) {
+    free(env->context);
+    free(env);
+  }
+}
+
+static void
+js__close_env(js_env_t *env) {
+  jerry_value_free(env->context->realm);
+  jerry_value_free(env->bindings);
+  jerry_value_free(env->exception);
+
+  jerry_cleanup();
+
+  uv_close((uv_handle_t *) &env->prepare, js__on_handle_close);
+  uv_close((uv_handle_t *) &env->check, js__on_handle_close);
+  uv_close((uv_handle_t *) &env->teardown, js__on_handle_close);
+}
+
+static void
+js__on_teardown(uv_async_t *handle) {
+  js_env_t *env = (js_env_t *) handle->data;
+
+  if (env->refs == 0) js__close_env(env);
+}
+
 int
 js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *options, js_env_t **result) {
   int err;
@@ -576,7 +644,8 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   jerry_module_on_import_meta(js__on_module_meta, env);
 
   env->loop = loop;
-  env->active_handles = 2;
+  env->active_handles = 3;
+  env->refs = 0;
   env->platform = platform;
   env->scope = NULL;
   env->context = malloc(sizeof(js_context_t));
@@ -588,6 +657,8 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   env->external_memory = 0;
   env->destroying = false;
   env->promise_rejections = NULL;
+
+  intrusive_list_init(&env->teardown_queue.tasks);
 
   env->callbacks.uncaught_exception = NULL;
   env->callbacks.uncaught_exception_data = NULL;
@@ -619,33 +690,37 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   // to be queued.
   uv_unref((uv_handle_t *) &env->check);
 
+  err = uv_async_init(loop, &env->teardown, js__on_teardown);
+  assert(err == 0);
+
+  env->teardown.data = (void *) env;
+
+  uv_unref((uv_handle_t *) &env->teardown);
+
   *result = env;
 
   return 0;
-}
-
-static void
-js__on_handle_close(uv_handle_t *handle) {
-  js_env_t *env = (js_env_t *) handle->data;
-
-  if (--env->active_handles == 0) {
-    free(env->context);
-    free(env);
-  }
 }
 
 int
 js_destroy_env(js_env_t *env) {
   env->destroying = true;
 
-  jerry_value_free(env->context->realm);
-  jerry_value_free(env->bindings);
-  jerry_value_free(env->exception);
+  intrusive_list_for_each(next, &env->teardown_queue.tasks) {
+    js_teardown_task_t *handle = intrusive_entry(next, js_teardown_task_t, list);
 
-  jerry_cleanup();
+    if (handle->type == js_deferred_teardown) {
+      handle->deferred.cb(&handle->deferred.handle, handle->data);
+    } else {
+      handle->immediate.cb(handle->data);
+    }
+  }
 
-  uv_close((uv_handle_t *) &env->prepare, js__on_handle_close);
-  uv_close((uv_handle_t *) &env->check, js__on_handle_close);
+  if (env->refs == 0) {
+    js__close_env(env);
+  } else {
+    uv_ref((uv_handle_t *) &env->teardown);
+  }
 
   return 0;
 }
@@ -3690,21 +3765,83 @@ js_unref_threadsafe_function(js_env_t *env, js_threadsafe_function_t *function) 
 
 int
 js_add_teardown_callback(js_env_t *env, js_teardown_cb callback, void *data) {
+  if (env->exception) return js__error(env);
+
+  js_teardown_task_t *task = malloc(sizeof(js_teardown_task_t));
+
+  task->type = js_immediate_teardown;
+  task->immediate.cb = callback;
+  task->data = data;
+
+  intrusive_list_prepend(&env->teardown_queue.tasks, &task->list);
+
   return 0;
 }
 
 int
 js_remove_teardown_callback(js_env_t *env, js_teardown_cb callback, void *data) {
+  if (env->exception) return js__error(env);
+
+  intrusive_list_for_each(next, &env->teardown_queue.tasks) {
+    js_teardown_task_t *task = intrusive_entry(next, js_teardown_task_t, list);
+
+    if (task->type == js_immediate_teardown && task->immediate.cb == callback && task->data == data) {
+      intrusive_list_remove(&env->teardown_queue.tasks, &task->list);
+
+      free(task);
+
+      return 0;
+    }
+  }
+
   return 0;
 }
 
 int
 js_add_deferred_teardown_callback(js_env_t *env, js_deferred_teardown_cb callback, void *data, js_deferred_teardown_t **result) {
+  if (env->exception) return js__error(env);
+
+  js_teardown_task_t *task = malloc(sizeof(js_teardown_task_t));
+
+  task->type = js_deferred_teardown;
+  task->deferred.cb = callback;
+  task->deferred.handle.env = env;
+  task->data = data;
+
+  intrusive_list_prepend(&env->teardown_queue.tasks, &task->list);
+
+  env->refs++;
+
+  if (result) *result = &task->deferred.handle;
+
   return 0;
 }
 
 int
 js_finish_deferred_teardown_callback(js_deferred_teardown_t *handle) {
+  // Allow continuing even with a pending exception
+
+  int err;
+
+  js_env_t *env = handle->env;
+
+  intrusive_list_for_each(next, &env->teardown_queue.tasks) {
+    js_teardown_task_t *task = intrusive_entry(next, js_teardown_task_t, list);
+
+    if (task->type == js_deferred_teardown && &task->deferred.handle == handle) {
+      intrusive_list_remove(&env->teardown_queue.tasks, &task->list);
+
+      if (--env->refs == 0 && env->destroying) {
+        err = uv_async_send(&env->teardown);
+        assert(err == 0);
+      }
+
+      free(task);
+
+      return 0;
+    }
+  }
+
   return -1;
 }
 

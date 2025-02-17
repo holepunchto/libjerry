@@ -12,6 +12,7 @@ add_library(js OBJECT)
 
 fetch_package("github:holepunchto/libjs" SOURCE_DIR js)
 fetch_package("github:holepunchto/libpath")
+fetch_package("github:holepunchto/libintrusive")
 
 set(JERRY_EXTERNAL_CONTEXT ON CACHE BOOL "Enable external context support" FORCE)
 set(JERRY_FUNCTION_TO_STRING ON CACHE BOOL "Enable function.toString() support" FORCE)
@@ -43,6 +44,7 @@ target_include_directories(
     $<TARGET_PROPERTY:uv,INTERFACE_INCLUDE_DIRECTORIES>
     $<TARGET_PROPERTY:utf,INTERFACE_INCLUDE_DIRECTORIES>
     $<TARGET_PROPERTY:path,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:intrusive,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
 add_library(js_shared SHARED)
