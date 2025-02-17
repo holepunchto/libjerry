@@ -40,6 +40,9 @@ struct js_platform_s {
 
 struct js_env_s {
   uv_loop_t *loop;
+  uv_prepare_t prepare;
+  uv_check_t check;
+  int active_handles;
 
   js_platform_t *platform;
   js_handle_scope_t *scope;
@@ -396,8 +399,42 @@ js__on_arraybuffer_free(jerry_arraybuffer_type_t type, uint8_t *buffer, uint32_t
   free(attachment);
 }
 
+static inline void
+js__check_liveness(js_env_t *env);
+
+static void
+js__on_prepare(uv_prepare_t *handle) {
+  js_env_t *env = (js_env_t *) handle->data;
+
+  js__check_liveness(env);
+}
+
+static void
+js__on_check(uv_check_t *handle) {
+  js_env_t *env = (js_env_t *) handle->data;
+
+  if (uv_loop_alive(env->loop)) return;
+
+  js__check_liveness(env);
+}
+
+static inline void
+js__check_liveness(js_env_t *env) {
+  int err;
+
+  if (true /* macrotask queue empty */) {
+    err = uv_prepare_stop(&env->prepare);
+  } else {
+    err = uv_prepare_start(&env->prepare, js__on_prepare);
+  }
+
+  assert(err == 0);
+}
+
 int
 js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *options, js_env_t **result) {
+  int err;
+
   js_env_t *env = malloc(sizeof(js_env_t));
 
   jerry_init(JERRY_INIT_EMPTY);
@@ -424,6 +461,27 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
 
   env->callbacks.dynamic_import = NULL;
   env->callbacks.dynamic_import_data = NULL;
+
+  err = uv_prepare_init(loop, &env->prepare);
+  assert(err == 0);
+
+  err = uv_prepare_start(&env->prepare, js__on_prepare);
+  assert(err == 0);
+
+  env->prepare.data = (void *) env;
+
+  err = uv_check_init(loop, &env->check);
+  assert(err == 0);
+
+  err = uv_check_start(&env->check, js__on_check);
+  assert(err == 0);
+
+  env->check.data = (void *) env;
+
+  // The check handle should not on its own keep the loop alive; it's simply
+  // used for running any outstanding tasks that might cause additional work
+  // to be queued.
+  uv_unref((uv_handle_t *) &env->check);
 
   *result = env;
 
