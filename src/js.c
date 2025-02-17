@@ -3187,6 +3187,35 @@ js_has_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *result
 }
 
 int
+js_has_own_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *result) {
+  if (env->exception) return js__error(env);
+
+  env->depth++;
+
+  jerry_value_t value = jerry_object_has_own(js__value_from_abi(object), js__value_from_abi(key));
+
+  if (env->depth == 1) js__run_microtasks(env);
+
+  env->depth--;
+
+  if (jerry_value_is_exception(value)) {
+    if (env->depth) {
+      env->exception = value;
+    } else {
+      js__uncaught_exception(env, value);
+    }
+
+    return js__error(env);
+  }
+
+  if (result) *result = jerry_value_is_true(value);
+
+  jerry_value_free(value);
+
+  return 0;
+}
+
+int
 js_set_property(js_env_t *env, js_value_t *object, js_value_t *key, js_value_t *value) {
   if (env->exception) return js__error(env);
 
@@ -4142,6 +4171,11 @@ js_request_garbage_collection(js_env_t *env) {
 
   jerry_heap_gc(JERRY_GC_PRESSURE_LOW);
 
+  return 0;
+}
+
+int
+js_get_heap_statistics(js_env_t *env, js_heap_statistics_t *result) {
   return 0;
 }
 
