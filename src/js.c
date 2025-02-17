@@ -352,6 +352,18 @@ js__run_microtasks(js_env_t *env) {
   err = js_open_handle_scope(env, &scope);
   assert(err == 0);
 
+  jerry_value_t value;
+
+  for (;;) {
+    value = jerry_run_jobs();
+
+    if (jerry_value_is_exception(value)) {
+      js__uncaught_exception(env, js__value_to_abi(value));
+    } else {
+      break;
+    }
+  }
+
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
 }
@@ -442,6 +454,7 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   jerry_arraybuffer_allocator(js__on_arraybuffer_allocate, js__on_arraybuffer_free, env);
 
   env->loop = loop;
+  env->active_handles = 2;
   env->platform = platform;
   env->scope = NULL;
   env->context = malloc(sizeof(js_context_t));
@@ -488,6 +501,16 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   return 0;
 }
 
+static void
+js__on_handle_close(uv_handle_t *handle) {
+  js_env_t *env = (js_env_t *) handle->data;
+
+  if (--env->active_handles == 0) {
+    free(env->context);
+    free(env);
+  }
+}
+
 int
 js_destroy_env(js_env_t *env) {
   env->destroying = true;
@@ -498,8 +521,8 @@ js_destroy_env(js_env_t *env) {
 
   jerry_cleanup();
 
-  free(env->context);
-  free(env);
+  uv_close((uv_handle_t *) &env->prepare, js__on_handle_close);
+  uv_close((uv_handle_t *) &env->check, js__on_handle_close);
 
   return 0;
 }
@@ -704,6 +727,8 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
   env->depth++;
 
   jerry_value_t value = jerry_run(parsed);
+
+  if (env->depth == 1) js__run_microtasks(env);
 
   env->depth--;
 
@@ -1663,6 +1688,8 @@ js_resolve_deferred(js_env_t *env, js_deferred_t *deferred, js_value_t *resoluti
 
   jerry_value_free(deferred->promise);
 
+  if (env->depth == 0) js__run_microtasks(env);
+
   free(deferred);
 
   return 0;
@@ -1675,6 +1702,8 @@ js_reject_deferred(js_env_t *env, js_deferred_t *deferred, js_value_t *resolutio
   jerry_value_free(jerry_promise_reject(deferred->promise, js__value_from_abi(resolution)));
 
   jerry_value_free(deferred->promise);
+
+  if (env->depth == 0) js__run_microtasks(env);
 
   free(deferred);
 
@@ -2752,6 +2781,8 @@ js_get_property_names(js_env_t *env, js_value_t *object, js_value_t **result) {
 
   jerry_value_t value = jerry_object_keys(js__value_from_abi(object));
 
+  if (env->depth == 1) js__run_microtasks(env);
+
   env->depth--;
 
   if (jerry_value_is_exception(value)) {
@@ -2781,6 +2812,8 @@ js_get_property(js_env_t *env, js_value_t *object, js_value_t *key, js_value_t *
   env->depth++;
 
   jerry_value_t value = jerry_object_get(js__value_from_abi(object), js__value_from_abi(key));
+
+  if (env->depth == 1) js__run_microtasks(env);
 
   env->depth--;
 
@@ -2812,6 +2845,8 @@ js_has_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *result
 
   jerry_value_t value = jerry_object_has(js__value_from_abi(object), js__value_from_abi(key));
 
+  if (env->depth == 1) js__run_microtasks(env);
+
   env->depth--;
 
   if (jerry_value_is_exception(value)) {
@@ -2839,6 +2874,8 @@ js_set_property(js_env_t *env, js_value_t *object, js_value_t *key, js_value_t *
 
   jerry_value_t exception = jerry_object_set(js__value_from_abi(object), js__value_from_abi(key), js__value_from_abi(value));
 
+  if (env->depth == 1) js__run_microtasks(env);
+
   env->depth--;
 
   if (jerry_value_is_exception(exception)) {
@@ -2861,6 +2898,8 @@ js_delete_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *res
   env->depth++;
 
   jerry_value_t value = jerry_object_delete(js__value_from_abi(object), js__value_from_abi(key));
+
+  if (env->depth == 1) js__run_microtasks(env);
 
   env->depth--;
 
@@ -2888,6 +2927,8 @@ js_get_named_property(js_env_t *env, js_value_t *object, const char *name, js_va
   env->depth++;
 
   jerry_value_t value = jerry_object_get_sz(js__value_from_abi(object), name);
+
+  if (env->depth == 1) js__run_microtasks(env);
 
   env->depth--;
 
@@ -2919,6 +2960,8 @@ js_has_named_property(js_env_t *env, js_value_t *object, const char *name, bool 
 
   jerry_value_t value = jerry_object_has_sz(js__value_from_abi(object), name);
 
+  if (env->depth == 1) js__run_microtasks(env);
+
   env->depth--;
 
   if (jerry_value_is_exception(value)) {
@@ -2946,6 +2989,8 @@ js_set_named_property(js_env_t *env, js_value_t *object, const char *name, js_va
 
   jerry_value_t exception = jerry_object_set_sz(js__value_from_abi(object), name, js__value_from_abi(value));
 
+  if (env->depth == 1) js__run_microtasks(env);
+
   env->depth--;
 
   if (jerry_value_is_exception(exception)) {
@@ -2968,6 +3013,8 @@ js_delete_named_property(js_env_t *env, js_value_t *object, const char *name, bo
   env->depth++;
 
   jerry_value_t value = jerry_object_delete_sz(js__value_from_abi(object), name);
+
+  if (env->depth == 1) js__run_microtasks(env);
 
   env->depth--;
 
@@ -2995,6 +3042,8 @@ js_get_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t **r
   env->depth++;
 
   jerry_value_t value = jerry_object_get_index(js__value_from_abi(object), index);
+
+  if (env->depth == 1) js__run_microtasks(env);
 
   env->depth--;
 
@@ -3031,6 +3080,8 @@ js_set_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t *va
 
   jerry_value_t exception = jerry_object_set_index(js__value_from_abi(object), index, js__value_from_abi(value));
 
+  if (env->depth == 1) js__run_microtasks(env);
+
   env->depth--;
 
   if (jerry_value_is_exception(exception)) {
@@ -3053,6 +3104,8 @@ js_delete_element(js_env_t *env, js_value_t *object, uint32_t index, bool *resul
   env->depth++;
 
   jerry_value_t value = jerry_object_delete_index(js__value_from_abi(object), index);
+
+  if (env->depth == 1) js__run_microtasks(env);
 
   env->depth--;
 
@@ -3309,6 +3362,8 @@ js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size
 
   free(args);
 
+  if (env->depth == 1) js__run_microtasks(env);
+
   env->depth--;
 
   if (jerry_value_is_exception(value)) {
@@ -3346,6 +3401,8 @@ js_call_function_with_checkpoint(js_env_t *env, js_value_t *receiver, js_value_t
   jerry_value_t value = jerry_call(js__value_from_abi(function), js__value_from_abi(receiver), args, argc);
 
   free(args);
+
+  js__run_microtasks(env);
 
   env->depth--;
 
