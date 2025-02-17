@@ -1775,6 +1775,62 @@ js_create_function(js_env_t *env, const char *name, size_t len, js_function_cb c
 
 int
 js_create_function_with_source(js_env_t *env, const char *name, size_t name_len, const char *file, size_t file_len, js_value_t *const args[], size_t args_len, int offset, js_value_t *source, js_value_t **result) {
+  if (env->exception) return js__error(env);
+
+  if (file_len == (size_t) -1) file_len = strlen(file);
+
+  size_t buf_len = 0;
+
+  for (int i = 0; i < args_len; i++) {
+    if (i != 0) buf_len += 2;
+
+    buf_len += jerry_string_size(js__value_from_abi(args[i]), JERRY_ENCODING_UTF8);
+  }
+
+  char *buf = malloc(buf_len + 1 /* NULL */);
+
+  size_t j = 0;
+
+  for (int i = 0; i < args_len; i++) {
+    if (i != 0) {
+      buf[j++] = ',';
+      buf[j++] = ' ';
+    }
+
+    j += jerry_string_to_buffer(js__value_from_abi(args[i]), JERRY_ENCODING_UTF8, (uint8_t *) &buf[j], buf_len - j);
+  }
+
+  buf[j] = '\0';
+
+  jerry_parse_options_t options = {
+    .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_ARGUMENT_LIST,
+    .source_name = jerry_string((const jerry_char_t *) file, file_len, JERRY_ENCODING_UTF8),
+    .start_line = 1,
+    .start_column = offset,
+    .argument_list = jerry_string_sz(buf),
+  };
+
+  free(buf);
+
+  jerry_value_t parsed = jerry_parse_value(js__value_from_abi(source), &options);
+
+  jerry_value_free(options.source_name);
+  jerry_value_free(options.argument_list);
+
+  if (jerry_value_is_exception(parsed)) {
+    if (env->depth) {
+      env->exception = parsed;
+    } else {
+      js__uncaught_exception(env, parsed);
+    }
+
+    return js__error(env);
+  }
+
+  *result = js__value_to_abi(parsed);
+
+  js__attach_to_handle_scope(env, env->scope, *result);
+
   return 0;
 }
 
