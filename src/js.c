@@ -1512,6 +1512,12 @@ js__on_function_call(const jerry_call_info_t *info, const jerry_value_t argv[], 
 
   jerry_value_t value = jerry_value_copy(js__value_from_abi(result));
 
+  if (env->exception) {
+    jerry_value_free(value);
+
+    value = env->exception;
+  }
+
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
 
@@ -3523,7 +3529,7 @@ int
 js_throw(js_env_t *env, js_value_t *error) {
   if (env->exception) return js__error(env);
 
-  jerry_value_free(jerry_throw_value(js__value_from_abi(error), false));
+  env->exception = jerry_throw_value(js__value_from_abi(error), false);
 
   return 0;
 }
@@ -3557,7 +3563,7 @@ js_throw_error(js_env_t *env, const char *code, const char *message) {
 
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_COMMON, message);
 
-  jerry_value_free(jerry_throw_value(error, true));
+  env->exception = jerry_throw_value(error, true);
 
   return 0;
 }
@@ -3593,7 +3599,7 @@ js_throw_type_error(js_env_t *env, const char *code, const char *message) {
 
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_TYPE, message);
 
-  jerry_value_free(jerry_throw_value(error, true));
+  env->exception = jerry_throw_value(error, true);
 
   return 0;
 }
@@ -3629,7 +3635,7 @@ js_throw_range_error(js_env_t *env, const char *code, const char *message) {
 
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_RANGE, message);
 
-  jerry_value_free(jerry_throw_value(error, true));
+  env->exception = jerry_throw_value(error, true);
 
   return 0;
 }
@@ -3665,7 +3671,7 @@ js_throw_syntax_error(js_env_t *env, const char *code, const char *message) {
 
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_SYNTAX, message);
 
-  jerry_value_free(jerry_throw_value(error, true));
+  env->exception = jerry_throw_value(error, true);
 
   return 0;
 }
