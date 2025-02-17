@@ -955,6 +955,8 @@ js_instantiate_module(js_env_t *env, js_module_t *module, js_module_resolve_cb c
 
   jerry_value_t exception = jerry_module_link(module->handle, js__on_module_resolve, module);
 
+  if (env->depth == 1) js__run_microtasks(env);
+
   env->depth--;
 
   if (jerry_value_is_exception(exception)) {
@@ -979,6 +981,8 @@ js_run_module(js_env_t *env, js_module_t *module, js_value_t **result) {
   env->depth++;
 
   jerry_value_t value = jerry_module_evaluate(module->handle);
+
+  if (env->depth == 1) js__run_microtasks(env);
 
   env->depth--;
 
