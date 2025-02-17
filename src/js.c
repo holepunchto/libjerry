@@ -524,6 +524,9 @@ js__on_promise_event(jerry_promise_event_type_t event_type, const jerry_value_t 
   }
 }
 
+static void
+js__on_module_meta(const jerry_value_t handle, const jerry_value_t meta, void *opaque);
+
 static inline void
 js__check_liveness(js_env_t *env);
 
@@ -564,11 +567,13 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
 
   jerry_init(JERRY_INIT_EMPTY);
 
-  jerry_promise_on_event(JERRY_PROMISE_EVENT_FILTER_ERROR, js__on_promise_event, env);
-
   jerry_arraybuffer_allocator(js__on_arraybuffer_allocate, js__on_arraybuffer_free, env);
 
   jerry_arraybuffer_heap_allocation_limit(0);
+
+  jerry_promise_on_event(JERRY_PROMISE_EVENT_FILTER_ERROR, js__on_promise_event, env);
+
+  jerry_module_on_import_meta(js__on_module_meta, env);
 
   env->loop = loop;
   env->active_handles = 2;
@@ -872,6 +877,28 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
   return 0;
 }
 
+static const jerry_object_native_info_t js__module = {};
+
+static void
+js__on_module_meta(const jerry_value_t handle, const jerry_value_t meta, void *opaque) {
+  int err;
+
+  js_module_t *module = jerry_object_get_native_ptr(handle, &js__module);
+
+  js_env_t *env = module->env;
+
+  if (module->meta) {
+    js_handle_scope_t *scope;
+    err = js_open_handle_scope(env, &scope);
+    assert(err == 0);
+
+    module->meta(env, module, js__value_to_abi(meta), module->meta_data);
+
+    err = js_close_handle_scope(env, scope);
+    assert(err == 0);
+  }
+}
+
 int
 js_create_module(js_env_t *env, const char *name, size_t len, int offset, js_value_t *source, js_module_meta_cb cb, void *data, js_module_t **result) {
   if (env->exception) return js__error(env);
@@ -901,6 +928,8 @@ js_create_module(js_env_t *env, const char *name, size_t len, int offset, js_val
 
   js_module_t *module = malloc(sizeof(js_module_t));
 
+  jerry_object_set_native_ptr(handle, &js__module, module);
+
   module->env = env;
   module->handle = handle;
   module->meta = cb;
@@ -919,8 +948,6 @@ js_create_module(js_env_t *env, const char *name, size_t len, int offset, js_val
 
   return 0;
 }
-
-static const jerry_object_native_info_t js__module = {};
 
 jerry_value_t
 js__on_module_evaluate(const jerry_value_t handle) {
@@ -1104,6 +1131,14 @@ js_run_module(js_env_t *env, js_module_t *module, js_value_t **result) {
 
   if (jerry_value_is_exception(value)) {
     value = jerry_exception_value(value, true);
+
+    jerry_value_free(jerry_promise_reject(promise, value));
+  } else if (env->exception) {
+    jerry_value_free(value);
+
+    value = jerry_exception_value(env->exception, true);
+
+    env->exception = 0;
 
     jerry_value_free(jerry_promise_reject(promise, value));
   } else {
