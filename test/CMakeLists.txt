@@ -193,6 +193,9 @@ list(APPEND skipped_tests
   wasm-async
   wasm-async-io
   wasm-async-io-multiple
+
+  # Not supported
+  run-module-async
 )
 
 foreach(test IN LISTS tests)

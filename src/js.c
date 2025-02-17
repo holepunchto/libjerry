@@ -215,11 +215,13 @@ struct js_promise_rejection_s {
   js_promise_rejection_t *next;
 };
 
+static thread_local size_t jerry_context_heap_size;
+
 static thread_local jerry_context_t *jerry_context = NULL;
 
 size_t JERRY_ATTR_WEAK
 jerry_port_context_alloc(size_t context_size) {
-  size_t total_size = context_size + 512 * 1024;
+  size_t total_size = context_size + jerry_context_heap_size;
 
   jerry_context = malloc(total_size);
 
@@ -630,6 +632,23 @@ js__on_teardown(uv_async_t *handle) {
 int
 js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *options, js_env_t **result) {
   int err;
+
+  if (options && options->memory_limit) {
+    jerry_context_heap_size = options->memory_limit;
+  } else {
+    uint64_t constrained_memory = uv_get_constrained_memory();
+    uint64_t total_memory = uv_get_total_memory();
+
+    if (constrained_memory > 0 && constrained_memory < total_memory) {
+      total_memory = constrained_memory;
+    }
+
+    if (total_memory > 0) {
+      jerry_context_heap_size = total_memory;
+    } else {
+      jerry_context_heap_size = 24 * 1024 * 1024;
+    }
+  }
 
   js_env_t *env = malloc(sizeof(js_env_t));
 
