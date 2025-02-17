@@ -13,7 +13,9 @@ add_library(js OBJECT)
 fetch_package("github:holepunchto/libjs" SOURCE_DIR js)
 fetch_package("github:holepunchto/libpath")
 
-set(JERRY_EXTERNAL_CONTEXT ON)
+set(JERRY_EXTERNAL_CONTEXT ON CACHE BOOL "Enable external context support" FORCE)
+set(JERRY_FUNCTION_TO_STRING ON CACHE BOOL "Enable function.toString() support" FORCE)
+set(JERRY_PROMISE_CALLBACK ON CACHE BOOL "Enable promise event callback support" FORCE)
 
 fetch_package("github:jerryscript-project/jerryscript@3.0.0")
 

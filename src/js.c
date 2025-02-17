@@ -364,6 +364,8 @@ js__run_microtasks(js_env_t *env) {
     }
   }
 
+  jerry_value_free(value);
+
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
 }
@@ -411,6 +413,31 @@ js__on_arraybuffer_free(jerry_arraybuffer_type_t type, uint8_t *buffer, uint32_t
   free(attachment);
 }
 
+static void
+js__on_promise_event(jerry_promise_event_type_t event_type, const jerry_value_t object, const jerry_value_t value, void *opaque) {
+  int err;
+
+  js_env_t *env = opaque;
+
+  if (env->callbacks.unhandled_rejection == NULL) return;
+
+  if (event_type == JERRY_PROMISE_EVENT_REJECT_WITHOUT_HANDLER) {
+    js_handle_scope_t *scope;
+    err = js_open_handle_scope(env, &scope);
+    assert(err == 0);
+
+    env->callbacks.unhandled_rejection(
+      env,
+      js__value_to_abi(value),
+      js__value_to_abi(object),
+      env->callbacks.unhandled_rejection_data
+    );
+
+    err = js_close_handle_scope(env, scope);
+    assert(err == 0);
+  }
+}
+
 static inline void
 js__check_liveness(js_env_t *env);
 
@@ -450,6 +477,8 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   js_env_t *env = malloc(sizeof(js_env_t));
 
   jerry_init(JERRY_INIT_EMPTY);
+
+  jerry_promise_on_event(JERRY_PROMISE_EVENT_FILTER_ERROR, js__on_promise_event, env);
 
   jerry_arraybuffer_allocator(js__on_arraybuffer_allocate, js__on_arraybuffer_free, env);
 
@@ -982,25 +1011,21 @@ js_run_module(js_env_t *env, js_module_t *module, js_value_t **result) {
 
   jerry_value_t value = jerry_module_evaluate(module->handle);
 
+  jerry_value_t promise = jerry_promise();
+
+  if (jerry_value_is_exception(value)) {
+    value = jerry_exception_value(value, true);
+
+    jerry_value_free(jerry_promise_reject(promise, value));
+  } else {
+    jerry_value_free(jerry_promise_resolve(promise, value));
+  }
+
+  jerry_value_free(value);
+
   if (env->depth == 1) js__run_microtasks(env);
 
   env->depth--;
-
-  if (jerry_value_is_exception(value)) {
-    if (env->depth) {
-      env->exception = value;
-    } else {
-      js__uncaught_exception(env, js__value_to_abi(value));
-    }
-
-    return js__error(env);
-  }
-
-  jerry_value_t promise = jerry_promise();
-
-  jerry_value_free(jerry_promise_resolve(promise, value));
-
-  jerry_value_free(value);
 
   *result = js__value_to_abi(promise);
 
