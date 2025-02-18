@@ -930,16 +930,19 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
 
   if (len == (size_t) -1) len = strlen(file);
 
+  jerry_value_t source_name = jerry_string((const jerry_char_t *) file, len, JERRY_ENCODING_UTF8);
+
   jerry_parse_options_t options = {
-    .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START,
-    .source_name = jerry_string((const jerry_char_t *) file, len, JERRY_ENCODING_UTF8),
+    .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE,
+    .source_name = source_name,
     .start_line = 1,
     .start_column = offset,
+    .user_value = source_name,
   };
 
   jerry_value_t parsed = jerry_parse_value(js__value_from_abi(source), &options);
 
-  jerry_value_free(options.source_name);
+  jerry_value_free(source_name);
 
   if (jerry_value_is_exception(parsed)) {
     if (env->depth) {
@@ -1004,7 +1007,7 @@ js__on_module_import_meta(const jerry_value_t handle, const jerry_value_t meta, 
 }
 
 static jerry_value_t
-js__on_module_import(const jerry_value_t specifier, const jerry_value_t user_value, void *opaque) {
+js__on_module_import(const jerry_value_t specifier, const jerry_value_t referrer, void *opaque) {
   int err;
 
   js_env_t *env = opaque;
@@ -1017,7 +1020,6 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t user_val
   }
 
   jerry_value_t assertions = jerry_null();
-  jerry_value_t referrer = jerry_null();
 
   js_handle_scope_t *scope;
   err = js_open_handle_scope(env, &scope);
@@ -1035,7 +1037,6 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t user_val
   assert(err == 0);
 
   jerry_value_free(assertions);
-  jerry_value_free(referrer);
 
   if (module == NULL) return jerry_value_copy(env->exception);
 
@@ -1048,16 +1049,19 @@ js_create_module(js_env_t *env, const char *name, size_t len, int offset, js_val
 
   if (len == (size_t) -1) len = strlen(name);
 
+  jerry_value_t source_name = jerry_string((const jerry_char_t *) name, len, JERRY_ENCODING_UTF8);
+
   jerry_parse_options_t options = {
-    .options = JERRY_PARSE_MODULE | JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START,
-    .source_name = jerry_string((const jerry_char_t *) name, len, JERRY_ENCODING_UTF8),
+    .options = JERRY_PARSE_MODULE | JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE,
+    .source_name = source_name,
     .start_line = 1,
     .start_column = offset,
+    .user_value = source_name,
   };
 
   jerry_value_t handle = jerry_parse_value(js__value_from_abi(source), &options);
 
-  jerry_value_free(options.source_name);
+  jerry_value_free(source_name);
 
   if (jerry_value_is_exception(handle)) {
     if (env->depth) {
