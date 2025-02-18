@@ -365,6 +365,8 @@ js_get_platform_loop(js_platform_t *platform, uv_loop_t **result) {
 
 static inline void
 js__uncaught_exception(js_env_t *env, jerry_value_t exception) {
+  assert(env->exception == 0);
+
   int err;
 
   jerry_value_t value = jerry_exception_value(exception, true);
@@ -1759,6 +1761,8 @@ js__on_function_call(const jerry_call_info_t *info, const jerry_value_t argv[], 
     jerry_value_free(value);
 
     value = env->exception;
+
+    env->exception = 0;
   }
 
   err = js_close_handle_scope(env, scope);
@@ -4154,6 +4158,10 @@ js_get_and_clear_last_exception(js_env_t *env, js_value_t **result) {
 int
 js_fatal_exception(js_env_t *env, js_value_t *error) {
   // Allow continuing even with a pending exception
+
+  jerry_value_free(env->exception);
+
+  env->exception = 0;
 
   js__uncaught_exception(env, js__value_from_abi(error));
 
