@@ -1383,11 +1383,19 @@ js_get_reference_value(js_env_t *env, js_ref_t *reference, js_value_t **result) 
 
 int
 js_define_class(js_env_t *env, const char *name, size_t len, js_function_cb constructor, void *data, js_property_descriptor_t const properties[], size_t properties_len, js_value_t **result) {
+  if (env->exception) return js__error(env);
+
+  // TODO
+
   return 0;
 }
 
 int
 js_define_properties(js_env_t *env, js_value_t *object, js_property_descriptor_t const properties[], size_t properties_len) {
+  if (env->exception) return js__error(env);
+
+  // TODO
+
   return 0;
 }
 
@@ -1449,6 +1457,8 @@ js_remove_wrap(js_env_t *env, js_value_t *object, void **result) {
 int
 js_create_delegate(js_env_t *env, const js_delegate_callbacks_t *callbacks, void *data, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  // TODO
 
   return 0;
 }
@@ -1622,6 +1632,8 @@ js_create_string_utf8(js_env_t *env, const utf8_t *str, size_t len, js_value_t *
 int
 js_create_string_utf16le(js_env_t *env, const utf16_t *str, size_t len, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  // TODO
 
   return 0;
 }
@@ -1918,6 +1930,8 @@ js_create_external(js_env_t *env, void *data, js_finalize_cb finalize_cb, void *
 int
 js_create_date(js_env_t *env, double time, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  // TODO
 
   return 0;
 }
@@ -2531,12 +2545,16 @@ int
 js_is_int32(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  // TODO
+
   return 0;
 }
 
 int
 js_is_uint32(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  // TODO
 
   return 0;
 }
@@ -3023,12 +3041,16 @@ int
 js_get_value_bigint_int64(js_env_t *env, js_value_t *value, int64_t *result, bool *lossless) {
   // Allow continuing even with a pending exception
 
+  // TODO
+
   return 0;
 }
 
 int
 js_get_value_bigint_uint64(js_env_t *env, js_value_t *value, uint64_t *result, bool *lossless) {
   // Allow continuing even with a pending exception
+
+  // TODO
 
   return 0;
 }
@@ -3053,6 +3075,8 @@ js_get_value_string_utf8(js_env_t *env, js_value_t *value, utf8_t *str, size_t l
 int
 js_get_value_string_utf16le(js_env_t *env, js_value_t *value, utf16_t *str, size_t len, size_t *result) {
   // Allow continuing even with a pending exception
+
+  // TODO
 
   return 0;
 }
@@ -3088,6 +3112,8 @@ js_get_value_external(js_env_t *env, js_value_t *value, void **result) {
 int
 js_get_value_date(js_env_t *env, js_value_t *value, double *result) {
   // Allow continuing even with a pending exception
+
+  // TODO
 
   return 0;
 }
@@ -3437,6 +3463,10 @@ js_get_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t **r
 
 int
 js_has_element(js_env_t *env, js_value_t *object, uint32_t index, bool *result) {
+  if (env->exception) return js__error(env);
+
+  // TODO
+
   return 0;
 }
 
@@ -3834,7 +3864,12 @@ js_new_instance(js_env_t *env, js_value_t *constructor, size_t argc, js_value_t 
 
 int
 js_create_threadsafe_function(js_env_t *env, js_value_t *function, size_t queue_limit, size_t initial_thread_count, js_finalize_cb finalize_cb, void *finalize_hint, void *context, js_threadsafe_function_cb cb, js_threadsafe_function_t **result) {
-  return 0;
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
 }
 
 int
@@ -3859,12 +3894,22 @@ js_release_threadsafe_function(js_threadsafe_function_t *function, js_threadsafe
 
 int
 js_ref_threadsafe_function(js_env_t *env, js_threadsafe_function_t *function) {
-  return 0;
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
 }
 
 int
 js_unref_threadsafe_function(js_env_t *env, js_threadsafe_function_t *function) {
-  return 0;
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
 }
 
 int
@@ -4199,17 +4244,37 @@ js_request_garbage_collection(js_env_t *env) {
 
 int
 js_get_heap_statistics(js_env_t *env, js_heap_statistics_t *result) {
+  jerry_heap_stats_t stats;
+  jerry_heap_stats(&stats);
+
+  result->total_heap_size = stats.size;
+  result->used_heap_size = stats.allocated_bytes;
+
+  if (result->version >= 1) {
+    result->external_memory = env->external_memory;
+  }
+
   return 0;
 }
 
 int
 js_create_inspector(js_env_t *env, js_inspector_t **result) {
-  return 0;
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
 }
 
 int
 js_destroy_inspector(js_env_t *env, js_inspector_t *inspector) {
-  return 0;
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
 }
 
 int
@@ -4224,10 +4289,20 @@ js_on_inspector_paused(js_env_t *env, js_inspector_t *inspector, js_inspector_pa
 
 int
 js_connect_inspector(js_env_t *env, js_inspector_t *inspector) {
-  return 0;
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
 }
 
 int
 js_send_inspector_request(js_env_t *env, js_inspector_t *inspector, js_value_t *message) {
-  return 0;
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
 }
