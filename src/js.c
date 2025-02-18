@@ -522,6 +522,8 @@ js__on_arraybuffer_free(jerry_arraybuffer_type_t type, uint8_t *buffer, uint32_t
 
         free(backing_store);
       }
+
+      break;
     }
     }
 
@@ -568,7 +570,10 @@ js__on_promise_event(jerry_promise_event_type_t event_type, const jerry_value_t 
 }
 
 static void
-js__on_module_meta(const jerry_value_t handle, const jerry_value_t meta, void *opaque);
+js__on_module_import_meta(const jerry_value_t handle, const jerry_value_t meta, void *opaque);
+
+static jerry_value_t
+js__on_module_import(const jerry_value_t specifier, const jerry_value_t user_value, void *opaque);
 
 static inline void
 js__check_liveness(js_env_t *env);
@@ -663,7 +668,9 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
 
   jerry_promise_on_event(JERRY_PROMISE_EVENT_FILTER_ERROR, js__on_promise_event, env);
 
-  jerry_module_on_import_meta(js__on_module_meta, env);
+  jerry_module_on_import_meta(js__on_module_import_meta, env);
+
+  jerry_module_on_import(js__on_module_import, env);
 
   env->loop = loop;
   env->active_handles = 3;
@@ -977,7 +984,7 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
 static const jerry_object_native_info_t js__module = {};
 
 static void
-js__on_module_meta(const jerry_value_t handle, const jerry_value_t meta, void *opaque) {
+js__on_module_import_meta(const jerry_value_t handle, const jerry_value_t meta, void *opaque) {
   int err;
 
   js_module_t *module = jerry_object_get_native_ptr(handle, &js__module);
@@ -994,6 +1001,45 @@ js__on_module_meta(const jerry_value_t handle, const jerry_value_t meta, void *o
     err = js_close_handle_scope(env, scope);
     assert(err == 0);
   }
+}
+
+static jerry_value_t
+js__on_module_import(const jerry_value_t specifier, const jerry_value_t user_value, void *opaque) {
+  int err;
+
+  js_env_t *env = opaque;
+
+  if (env->callbacks.dynamic_import == NULL) {
+    err = js_throw_error(env, NULL, "Dynamic import() is not supported");
+    assert(err == 0);
+
+    return jerry_value_copy(env->exception);
+  }
+
+  jerry_value_t assertions = jerry_null();
+  jerry_value_t referrer = jerry_null();
+
+  js_handle_scope_t *scope;
+  err = js_open_handle_scope(env, &scope);
+  assert(err == 0);
+
+  js_module_t *module = env->callbacks.dynamic_import(
+    env,
+    js__value_to_abi(specifier),
+    js__value_to_abi(assertions),
+    js__value_to_abi(referrer),
+    env->callbacks.dynamic_import_data
+  );
+
+  err = js_close_handle_scope(env, scope);
+  assert(err == 0);
+
+  jerry_value_free(assertions);
+  jerry_value_free(referrer);
+
+  if (module == NULL) return jerry_value_copy(env->exception);
+
+  return module->handle;
 }
 
 int
