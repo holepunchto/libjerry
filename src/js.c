@@ -1948,6 +1948,22 @@ js_create_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t
 
   jerry_value_t error = jerry_error(JERRY_ERROR_COMMON, js__value_from_abi(message));
 
+  if (code) {
+    jerry_value_t exception = jerry_object_set_sz(error, "code", js__value_from_abi(code));
+
+    if (jerry_value_is_exception(exception)) {
+      jerry_value_free(error);
+
+      if (env->depth) {
+        env->exception = exception;
+      } else {
+        js__uncaught_exception(env, exception);
+      }
+
+      return js__error(env);
+    }
+  }
+
   *result = js__value_to_abi(error);
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -1960,6 +1976,22 @@ js_create_type_error(js_env_t *env, js_value_t *code, js_value_t *message, js_va
   // Allow continuing even with a pending exception
 
   jerry_value_t error = jerry_error(JERRY_ERROR_TYPE, js__value_from_abi(message));
+
+  if (code) {
+    jerry_value_t exception = jerry_object_set_sz(error, "code", js__value_from_abi(code));
+
+    if (jerry_value_is_exception(exception)) {
+      jerry_value_free(error);
+
+      if (env->depth) {
+        env->exception = exception;
+      } else {
+        js__uncaught_exception(env, exception);
+      }
+
+      return js__error(env);
+    }
+  }
 
   *result = js__value_to_abi(error);
 
@@ -1974,6 +2006,22 @@ js_create_range_error(js_env_t *env, js_value_t *code, js_value_t *message, js_v
 
   jerry_value_t error = jerry_error(JERRY_ERROR_RANGE, js__value_from_abi(message));
 
+  if (code) {
+    jerry_value_t exception = jerry_object_set_sz(error, "code", js__value_from_abi(code));
+
+    if (jerry_value_is_exception(exception)) {
+      jerry_value_free(error);
+
+      if (env->depth) {
+        env->exception = exception;
+      } else {
+        js__uncaught_exception(env, exception);
+      }
+
+      return js__error(env);
+    }
+  }
+
   *result = js__value_to_abi(error);
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -1986,6 +2034,22 @@ js_create_syntax_error(js_env_t *env, js_value_t *code, js_value_t *message, js_
   // Allow continuing even with a pending exception
 
   jerry_value_t error = jerry_error(JERRY_ERROR_SYNTAX, js__value_from_abi(message));
+
+  if (code) {
+    jerry_value_t exception = jerry_object_set_sz(error, "code", js__value_from_abi(code));
+
+    if (jerry_value_is_exception(exception)) {
+      jerry_value_free(error);
+
+      if (env->depth) {
+        env->exception = exception;
+      } else {
+        js__uncaught_exception(env, exception);
+      }
+
+      return js__error(env);
+    }
+  }
 
   *result = js__value_to_abi(error);
 
@@ -4055,6 +4119,22 @@ js_throw_error(js_env_t *env, const char *code, const char *message) {
 
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_COMMON, message);
 
+  if (code) {
+    jerry_value_t exception = jerry_object_set_sz(error, "code", jerry_string_sz(code));
+
+    if (jerry_value_is_exception(exception)) {
+      jerry_value_free(error);
+
+      if (env->depth) {
+        env->exception = exception;
+      } else {
+        js__uncaught_exception(env, exception);
+      }
+
+      return js__error(env);
+    }
+  }
+
   env->exception = jerry_throw_value(error, true);
 
   return 0;
@@ -4090,6 +4170,22 @@ js_throw_type_error(js_env_t *env, const char *code, const char *message) {
   if (env->exception) return js__error(env);
 
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_TYPE, message);
+
+  if (code) {
+    jerry_value_t exception = jerry_object_set_sz(error, "code", jerry_string_sz(code));
+
+    if (jerry_value_is_exception(exception)) {
+      jerry_value_free(error);
+
+      if (env->depth) {
+        env->exception = exception;
+      } else {
+        js__uncaught_exception(env, exception);
+      }
+
+      return js__error(env);
+    }
+  }
 
   env->exception = jerry_throw_value(error, true);
 
@@ -4127,6 +4223,22 @@ js_throw_range_error(js_env_t *env, const char *code, const char *message) {
 
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_RANGE, message);
 
+  if (code) {
+    jerry_value_t exception = jerry_object_set_sz(error, "code", jerry_string_sz(code));
+
+    if (jerry_value_is_exception(exception)) {
+      jerry_value_free(error);
+
+      if (env->depth) {
+        env->exception = exception;
+      } else {
+        js__uncaught_exception(env, exception);
+      }
+
+      return js__error(env);
+    }
+  }
+
   env->exception = jerry_throw_value(error, true);
 
   return 0;
@@ -4162,6 +4274,22 @@ js_throw_syntax_error(js_env_t *env, const char *code, const char *message) {
   if (env->exception) return js__error(env);
 
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_SYNTAX, message);
+
+  if (code) {
+    jerry_value_t exception = jerry_object_set_sz(error, "code", jerry_string_sz(code));
+
+    if (jerry_value_is_exception(exception)) {
+      jerry_value_free(error);
+
+      if (env->depth) {
+        env->exception = exception;
+      } else {
+        js__uncaught_exception(env, exception);
+      }
+
+      return js__error(env);
+    }
+  }
 
   env->exception = jerry_throw_value(error, true);
 
