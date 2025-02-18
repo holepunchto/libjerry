@@ -243,11 +243,7 @@ jerry_port_init(void) {}
 
 void JERRY_ATTR_WEAK
 jerry_port_fatal(jerry_fatal_code_t code) {
-  if (code != 0 && code != JERRY_FATAL_OUT_OF_MEMORY) {
-    abort();
-  }
-
-  exit((int) code);
+  abort();
 }
 
 void JERRY_ATTR_WEAK
