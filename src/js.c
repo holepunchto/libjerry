@@ -497,13 +497,17 @@ js__on_arraybuffer_free(jerry_arraybuffer_type_t type, uint8_t *buffer, uint32_t
 
     js_arraybuffer_attachment_t *attachment = data;
 
-    if (attachment == NULL) return;
+    if (attachment == NULL) {
+      free(buffer);
+
+      return;
+    }
 
     switch (attachment->type) {
     case js_arraybuffer_finalizer: {
       js_finalizer_t *finalizer = &attachment->finalizer;
 
-      finalizer->cb(finalizer->env, finalizer->data, finalizer->hint);
+      if (finalizer->cb) finalizer->cb(finalizer->env, finalizer->data, finalizer->hint);
 
       break;
     }
@@ -2195,20 +2199,16 @@ int
 js_create_external_arraybuffer(js_env_t *env, void *data, size_t len, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {
   if (env->exception) return js__error(env);
 
-  js_arraybuffer_attachment_t *attachment = NULL;
+  js_arraybuffer_attachment_t *attachment = malloc(sizeof(js_arraybuffer_attachment_t));
 
-  if (finalize_cb) {
-    attachment = malloc(sizeof(js_arraybuffer_attachment_t));
+  attachment->type = js_arraybuffer_finalizer;
 
-    attachment->type = js_arraybuffer_finalizer;
+  js_finalizer_t *finalizer = &attachment->finalizer;
 
-    js_finalizer_t *finalizer = &attachment->finalizer;
-
-    finalizer->env = env;
-    finalizer->data = data;
-    finalizer->cb = finalize_cb;
-    finalizer->hint = finalize_hint;
-  }
+  finalizer->env = env;
+  finalizer->data = data;
+  finalizer->cb = finalize_cb;
+  finalizer->hint = finalize_hint;
 
   *result = js__value_to_abi(jerry_arraybuffer_external(data, len, attachment));
 
@@ -2296,20 +2296,16 @@ int
 js_create_external_sharedarraybuffer(js_env_t *env, void *data, size_t len, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {
   if (env->exception) return js__error(env);
 
-  js_arraybuffer_attachment_t *attachment = NULL;
+  js_arraybuffer_attachment_t *attachment = malloc(sizeof(js_arraybuffer_attachment_t));
 
-  if (finalize_cb) {
-    attachment = malloc(sizeof(js_arraybuffer_attachment_t));
+  attachment->type = js_arraybuffer_finalizer;
 
-    attachment->type = js_arraybuffer_finalizer;
+  js_finalizer_t *finalizer = &attachment->finalizer;
 
-    js_finalizer_t *finalizer = &attachment->finalizer;
-
-    finalizer->env = env;
-    finalizer->data = data;
-    finalizer->cb = finalize_cb;
-    finalizer->hint = finalize_hint;
-  }
+  finalizer->env = env;
+  finalizer->data = data;
+  finalizer->cb = finalize_cb;
+  finalizer->hint = finalize_hint;
 
   *result = js__value_to_abi(jerry_shared_arraybuffer_external(data, len, attachment));
 
@@ -4120,7 +4116,11 @@ js_throw_error(js_env_t *env, const char *code, const char *message) {
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_COMMON, message);
 
   if (code) {
-    jerry_value_t exception = jerry_object_set_sz(error, "code", jerry_string_sz(code));
+    jerry_value_t value = jerry_string_sz(code);
+
+    jerry_value_t exception = jerry_object_set_sz(error, "code", value);
+
+    jerry_value_free(value);
 
     if (jerry_value_is_exception(exception)) {
       jerry_value_free(error);
@@ -4172,7 +4172,11 @@ js_throw_type_error(js_env_t *env, const char *code, const char *message) {
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_TYPE, message);
 
   if (code) {
-    jerry_value_t exception = jerry_object_set_sz(error, "code", jerry_string_sz(code));
+    jerry_value_t value = jerry_string_sz(code);
+
+    jerry_value_t exception = jerry_object_set_sz(error, "code", value);
+
+    jerry_value_free(value);
 
     if (jerry_value_is_exception(exception)) {
       jerry_value_free(error);
@@ -4224,7 +4228,11 @@ js_throw_range_error(js_env_t *env, const char *code, const char *message) {
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_RANGE, message);
 
   if (code) {
-    jerry_value_t exception = jerry_object_set_sz(error, "code", jerry_string_sz(code));
+    jerry_value_t value = jerry_string_sz(code);
+
+    jerry_value_t exception = jerry_object_set_sz(error, "code", value);
+
+    jerry_value_free(value);
 
     if (jerry_value_is_exception(exception)) {
       jerry_value_free(error);
@@ -4276,7 +4284,11 @@ js_throw_syntax_error(js_env_t *env, const char *code, const char *message) {
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_SYNTAX, message);
 
   if (code) {
-    jerry_value_t exception = jerry_object_set_sz(error, "code", jerry_string_sz(code));
+    jerry_value_t value = jerry_string_sz(code);
+
+    jerry_value_t exception = jerry_object_set_sz(error, "code", value);
+
+    jerry_value_free(value);
 
     if (jerry_value_is_exception(exception)) {
       jerry_value_free(error);
