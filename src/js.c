@@ -6,6 +6,7 @@
 #include <jerryscript-types.h>
 #include <jerryscript.h>
 #include <js.h>
+#include <math.h>
 #include <path.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -2550,8 +2551,13 @@ int
 js_is_int32(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
-  // TODO
-  abort();
+  if (jerry_value_is_number(js__value_from_abi(value))) {
+    double integral, number = jerry_value_as_number(js__value_from_abi(value));
+
+    *result = modf(number, &integral) == 0.0 && integral >= INT32_MIN && integral <= INT32_MAX;
+  } else {
+    *result = false;
+  }
 
   return 0;
 }
@@ -2560,8 +2566,13 @@ int
 js_is_uint32(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
-  // TODO
-  abort();
+  if (jerry_value_is_number(js__value_from_abi(value))) {
+    double integral, number = jerry_value_as_number(js__value_from_abi(value));
+
+    *result = modf(number, &integral) == 0.0 && integral >= 0.0 && integral <= UINT32_MAX;
+  } else {
+    *result = false;
+  }
 
   return 0;
 }
