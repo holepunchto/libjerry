@@ -1386,6 +1386,7 @@ js_define_class(js_env_t *env, const char *name, size_t len, js_function_cb cons
   if (env->exception) return js__error(env);
 
   // TODO
+  abort();
 
   return 0;
 }
@@ -1395,6 +1396,7 @@ js_define_properties(js_env_t *env, js_value_t *object, js_property_descriptor_t
   if (env->exception) return js__error(env);
 
   // TODO
+  abort();
 
   return 0;
 }
@@ -1459,6 +1461,7 @@ js_create_delegate(js_env_t *env, const js_delegate_callbacks_t *callbacks, void
   // Allow continuing even with a pending exception
 
   // TODO
+  abort();
 
   return 0;
 }
@@ -1634,6 +1637,7 @@ js_create_string_utf16le(js_env_t *env, const utf16_t *str, size_t len, js_value
   // Allow continuing even with a pending exception
 
   // TODO
+  abort();
 
   return 0;
 }
@@ -1932,6 +1936,7 @@ js_create_date(js_env_t *env, double time, js_value_t **result) {
   // Allow continuing even with a pending exception
 
   // TODO
+  abort();
 
   return 0;
 }
@@ -2546,6 +2551,7 @@ js_is_int32(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
   // TODO
+  abort();
 
   return 0;
 }
@@ -2555,6 +2561,7 @@ js_is_uint32(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
   // TODO
+  abort();
 
   return 0;
 }
@@ -3042,6 +3049,7 @@ js_get_value_bigint_int64(js_env_t *env, js_value_t *value, int64_t *result, boo
   // Allow continuing even with a pending exception
 
   // TODO
+  abort();
 
   return 0;
 }
@@ -3051,6 +3059,7 @@ js_get_value_bigint_uint64(js_env_t *env, js_value_t *value, uint64_t *result, b
   // Allow continuing even with a pending exception
 
   // TODO
+  abort();
 
   return 0;
 }
@@ -3077,6 +3086,7 @@ js_get_value_string_utf16le(js_env_t *env, js_value_t *value, utf16_t *str, size
   // Allow continuing even with a pending exception
 
   // TODO
+  abort();
 
   return 0;
 }
@@ -3114,6 +3124,7 @@ js_get_value_date(js_env_t *env, js_value_t *value, double *result) {
   // Allow continuing even with a pending exception
 
   // TODO
+  abort();
 
   return 0;
 }
@@ -3466,6 +3477,7 @@ js_has_element(js_env_t *env, js_value_t *object, uint32_t index, bool *result) 
   if (env->exception) return js__error(env);
 
   // TODO
+  abort();
 
   return 0;
 }
