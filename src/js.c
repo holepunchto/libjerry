@@ -1040,7 +1040,7 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t referrer
 
   if (module == NULL) return jerry_value_copy(env->exception);
 
-  return module->handle;
+  return jerry_value_copy(module->handle);
 }
 
 int
