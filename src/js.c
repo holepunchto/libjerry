@@ -4395,8 +4395,17 @@ js_request_garbage_collection(js_env_t *env) {
 
 int
 js_get_heap_statistics(js_env_t *env, js_heap_statistics_t *result) {
+  int err;
+
   jerry_heap_stats_t stats;
-  jerry_heap_stats(&stats);
+  err = jerry_heap_stats(&stats);
+
+  if (err != 1) {
+    err = js_throw_error(env, NULL, "Unable to get heap statistics");
+    assert(err == 0);
+
+    return js__error(env);
+  }
 
   result->total_heap_size = stats.size;
   result->used_heap_size = stats.allocated_bytes;
