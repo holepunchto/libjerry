@@ -127,7 +127,7 @@ struct js_handle_scope_s {
 };
 
 struct js_escapable_handle_scope_s {
-  js_handle_scope_t scope;
+  js_handle_scope_t *parent;
 };
 
 struct js_module_s {
@@ -861,7 +861,7 @@ js_escape_handle(js_env_t *env, js_escapable_handle_scope_t *scope, js_value_t *
 
   *result = js__value_to_abi(value);
 
-  js__attach_to_handle_scope(env, (js_handle_scope_t *) scope, *result);
+  js__attach_to_handle_scope(env, scope->parent, *result);
 
   return 0;
 }
