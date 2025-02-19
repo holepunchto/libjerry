@@ -1918,20 +1918,25 @@ js_create_function_with_source(js_env_t *env, const char *name, size_t name_len,
 
   buf[j] = '\0';
 
+  jerry_value_t source_name = jerry_string((const jerry_char_t *) file, file_len, JERRY_ENCODING_UTF8);
+
+  jerry_value_t argument_list = jerry_string_sz(buf);
+
   jerry_parse_options_t options = {
-    .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_ARGUMENT_LIST,
-    .source_name = jerry_string((const jerry_char_t *) file, file_len, JERRY_ENCODING_UTF8),
+    .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE | JERRY_PARSE_HAS_ARGUMENT_LIST,
+    .source_name = source_name,
     .start_line = 1,
     .start_column = offset,
-    .argument_list = jerry_string_sz(buf),
+    .user_value = source_name,
+    .argument_list = argument_list,
   };
 
   free(buf);
 
   jerry_value_t parsed = jerry_parse_value(js__value_from_abi(source), &options);
 
-  jerry_value_free(options.source_name);
-  jerry_value_free(options.argument_list);
+  jerry_value_free(source_name);
+  jerry_value_free(argument_list);
 
   if (jerry_value_is_exception(parsed)) {
     if (env->depth) {
