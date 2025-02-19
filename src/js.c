@@ -34,6 +34,7 @@
 typedef struct js_callback_s js_callback_t;
 typedef struct js_finalizer_s js_finalizer_t;
 typedef struct js_finalizer_list_s js_finalizer_list_t;
+typedef struct js_delegate_s js_delegate_t;
 typedef struct js_arraybuffer_header_s js_arraybuffer_header_t;
 typedef struct js_arraybuffer_attachment_s js_arraybuffer_attachment_t;
 typedef struct js_promise_rejection_s js_promise_rejection_t;
@@ -167,6 +168,14 @@ struct js_finalizer_s {
 struct js_finalizer_list_s {
   js_finalizer_t finalizer;
   js_finalizer_list_t *next;
+};
+
+struct js_delegate_s {
+  js_env_t *env;
+  js_delegate_callbacks_t callbacks;
+  void *data;
+  js_finalize_cb finalize_cb;
+  void *finalize_hint;
 };
 
 struct js_callback_s {
@@ -1671,12 +1680,196 @@ js_remove_wrap(js_env_t *env, js_value_t *object, void **result) {
   return 0;
 }
 
+static void
+js__on_delegate_finalize(void *data, jerry_object_native_info_t *info) {
+  js_delegate_t *delegate = data;
+
+  if (delegate->finalize_cb) delegate->finalize_cb(delegate->env, delegate->data, delegate->finalize_hint);
+
+  free(delegate);
+}
+
+static js_value_t *
+js__on_delegate_get(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 3;
+  js_value_t *argv[3];
+
+  js_delegate_t *delegate;
+  err = js_get_callback_info(env, info, &argc, argv, NULL, (void **) &delegate);
+  assert(err == 0);
+
+  assert(argc == 3);
+
+  return delegate->callbacks.get(env, argv[1], delegate->data);
+}
+
+static js_value_t *
+js__on_delegate_has(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 2;
+  js_value_t *argv[2];
+
+  js_delegate_t *delegate;
+  err = js_get_callback_info(env, info, &argc, argv, NULL, (void **) &delegate);
+  assert(err == 0);
+
+  assert(argc == 2);
+
+  bool exists = delegate->callbacks.has(env, argv[1], delegate->data);
+
+  if (env->exception) return NULL;
+
+  js_value_t *result;
+  err = js_get_boolean(env, exists, &result);
+  assert(err == 0);
+
+  return result;
+}
+
+static js_value_t *
+js__on_delegate_set(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 4;
+  js_value_t *argv[4];
+
+  js_delegate_t *delegate;
+  err = js_get_callback_info(env, info, &argc, argv, NULL, (void **) &delegate);
+  assert(err == 0);
+
+  assert(argc == 4);
+
+  bool success = delegate->callbacks.set(env, argv[1], argv[2], delegate->data);
+
+  if (env->exception) return NULL;
+
+  js_value_t *result;
+  err = js_get_boolean(env, success, &result);
+  assert(err == 0);
+
+  return result;
+}
+
+static js_value_t *
+js__on_delegate_delete_property(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 2;
+  js_value_t *argv[2];
+
+  js_delegate_t *delegate;
+  err = js_get_callback_info(env, info, &argc, argv, NULL, (void **) &delegate);
+  assert(err == 0);
+
+  assert(argc == 2);
+
+  bool success = delegate->callbacks.delete_property(env, argv[1], delegate->data);
+
+  if (env->exception) return NULL;
+
+  js_value_t *result;
+  err = js_get_boolean(env, success, &result);
+  assert(err == 0);
+
+  return result;
+}
+
+static js_value_t *
+js__on_delegate_own_keys(js_env_t *env, js_callback_info_t *info) {
+  int err;
+
+  size_t argc = 1;
+  js_value_t *argv[1];
+
+  js_delegate_t *delegate;
+  err = js_get_callback_info(env, info, &argc, argv, NULL, (void **) &delegate);
+  assert(err == 0);
+
+  assert(argc == 1);
+
+  return delegate->callbacks.own_keys(env, delegate->data);
+}
+
+static const jerry_object_native_info_t js__delegate = {
+  .free_cb = js__on_delegate_finalize
+};
+
 int
 js_create_delegate(js_env_t *env, const js_delegate_callbacks_t *callbacks, void *data, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {
   // Allow continuing even with a pending exception
 
-  // TODO
-  abort();
+  int err;
+
+  js_delegate_t *delegate = malloc(sizeof(js_delegate_t));
+
+  delegate->env = env;
+  delegate->data = data;
+  delegate->finalize_cb = finalize_cb;
+  delegate->finalize_hint = finalize_hint;
+
+  memcpy(&delegate->callbacks, callbacks, sizeof(js_delegate_callbacks_t));
+
+  jerry_value_t target = jerry_object();
+  jerry_value_t handler = jerry_object();
+
+  if (callbacks->get) {
+    js_value_t *fn;
+    err = js_create_function(env, "get", -1, js__on_delegate_get, delegate, &fn);
+    assert(err == 0);
+
+    err = js_set_named_property(env, js__value_to_abi(handler), "get", fn);
+    assert(err == 0);
+  }
+
+  if (callbacks->has) {
+    js_value_t *fn;
+    err = js_create_function(env, "has", -1, js__on_delegate_has, delegate, &fn);
+    assert(err == 0);
+
+    err = js_set_named_property(env, js__value_to_abi(handler), "has", fn);
+    assert(err == 0);
+  }
+
+  if (callbacks->set) {
+    js_value_t *fn;
+    err = js_create_function(env, "set", -1, js__on_delegate_set, delegate, &fn);
+    assert(err == 0);
+
+    err = js_set_named_property(env, js__value_to_abi(handler), "set", fn);
+    assert(err == 0);
+  }
+
+  if (callbacks->delete_property) {
+    js_value_t *fn;
+    err = js_create_function(env, "deleteProperty", -1, js__on_delegate_delete_property, delegate, &fn);
+    assert(err == 0);
+
+    err = js_set_named_property(env, js__value_to_abi(handler), "deleteProperty", fn);
+    assert(err == 0);
+  }
+
+  if (callbacks->own_keys) {
+    js_value_t *fn;
+    err = js_create_function(env, "ownKeys", -1, js__on_delegate_own_keys, delegate, &fn);
+    assert(err == 0);
+
+    err = js_set_named_property(env, js__value_to_abi(handler), "ownKeys", fn);
+    assert(err == 0);
+  }
+
+  jerry_value_t proxy = jerry_proxy(target, handler);
+
+  jerry_object_set_native_ptr(proxy, &js__delegate, delegate);
+
+  jerry_value_free(target);
+  jerry_value_free(handler);
+
+  *result = js__value_to_abi(proxy);
+
+  js__attach_to_handle_scope(env, env->scope, *result);
 
   return 0;
 }
