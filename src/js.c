@@ -1768,7 +1768,13 @@ js__on_delegate_delete_property(js_env_t *env, js_callback_info_t *info) {
 
   bool success = delegate->callbacks.delete_property(env, argv[1], delegate->data);
 
-  if (env->exception) return NULL;
+  if (env->exception) {
+    jerry_value_free(env->exception);
+
+    env->exception = 0;
+
+    success = false;
+  };
 
   js_value_t *result;
   err = js_get_boolean(env, success, &result);
