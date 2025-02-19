@@ -1827,14 +1827,15 @@ js__on_function_call(const jerry_call_info_t *info, const jerry_value_t argv[], 
 
   js_value_t *result = callback->cb(env, &callback_info);
 
-  jerry_value_t value = jerry_value_copy(js__value_from_abi(result));
+  jerry_value_t value;
 
   if (env->exception) {
-    jerry_value_free(value);
-
     value = env->exception;
 
     env->exception = 0;
+  } else {
+    if (result) value = jerry_value_copy(js__value_from_abi(result));
+    else value = jerry_undefined();
   }
 
   err = js_close_handle_scope(env, scope);
