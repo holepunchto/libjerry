@@ -1707,13 +1707,8 @@ int
 js_create_string_latin1(js_env_t *env, const latin1_t *str, size_t len, js_value_t **result) {
   // Allow continuing even with a pending exception
 
-  if (len == (size_t) -1) len = strlen((const char *) str);
-
-  jerry_value_t value = jerry_string(str, len, JERRY_ENCODING_CESU8);
-
-  *result = js__value_to_abi(value);
-
-  js__attach_to_handle_scope(env, env->scope, *result);
+  // TODO
+  abort();
 
   return 0;
 }
@@ -3230,15 +3225,8 @@ int
 js_get_value_string_latin1(js_env_t *env, js_value_t *value, latin1_t *str, size_t len, size_t *result) {
   // Allow continuing even with a pending exception
 
-  if (str == NULL) {
-    *result = jerry_string_size(js__value_from_abi(value), JERRY_ENCODING_CESU8);
-  } else if (len != 0) {
-    size_t written = jerry_string_to_buffer(js__value_from_abi(value), JERRY_ENCODING_CESU8, str, len);
-
-    if (written < len) str[written] = '\0';
-
-    if (result) *result = written;
-  } else if (result) *result = 0;
+  // TODO
+  abort();
 
   return 0;
 }
