@@ -1015,10 +1015,7 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t referrer
   js_env_t *env = opaque;
 
   if (env->callbacks.dynamic_import == NULL) {
-    err = js_throw_error(env, NULL, "Dynamic import() is not supported");
-    assert(err == 0);
-
-    return jerry_value_copy(env->exception);
+    return jerry_throw_sz(JERRY_ERROR_COMMON, "Dynamic import() is not supported");
   }
 
   jerry_value_t assertions = jerry_null();
@@ -1040,9 +1037,17 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t referrer
 
   jerry_value_free(assertions);
 
-  if (env->exception) return jerry_value_copy(env->exception);
+  jerry_value_t value;
 
-  return jerry_value_copy(module->handle);
+  if (env->exception) {
+    value = env->exception;
+
+    env->exception = 0;
+  } else {
+    value = jerry_value_copy(module->handle);
+  }
+
+  return value;
 }
 
 int
@@ -1115,9 +1120,17 @@ js__on_module_evaluate(const jerry_value_t handle) {
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
 
-  if (env->exception) return jerry_value_copy(env->exception);
+  jerry_value_t value;
 
-  return 0;
+  if (env->exception) {
+    value = env->exception;
+
+    env->exception = 0;
+  } else {
+    value = jerry_undefined();
+  }
+
+  return value;
 }
 
 int
@@ -1237,9 +1250,17 @@ js__on_module_resolve(const jerry_value_t specifier, const jerry_value_t referre
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
 
-  if (env->exception) return jerry_value_copy(env->exception);
+  jerry_value_t value;
 
-  return jerry_value_copy(resolved->handle);
+  if (env->exception) {
+    value = env->exception;
+
+    env->exception = 0;
+  } else {
+    value = jerry_value_copy(resolved->handle);
+  }
+
+  return value;
 }
 
 int
@@ -1834,8 +1855,11 @@ js__on_function_call(const jerry_call_info_t *info, const jerry_value_t argv[], 
 
     env->exception = 0;
   } else {
-    if (result) value = jerry_value_copy(js__value_from_abi(result));
-    else value = jerry_undefined();
+    if (result) {
+      value = jerry_value_copy(js__value_from_abi(result));
+    } else {
+      value = jerry_undefined();
+    }
   }
 
   err = js_close_handle_scope(env, scope);
