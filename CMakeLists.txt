@@ -59,12 +59,6 @@ set_target_properties(
   WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
 
-target_sources(
-  js_shared
-  PRIVATE
-    $<TARGET_OBJECTS:jerry-core>
-)
-
 target_link_libraries(
   js_shared
   PUBLIC
@@ -74,6 +68,8 @@ target_link_libraries(
     path_shared
   PRIVATE
     js
+  PRIVATE
+    $<TARGET_OBJECTS:jerry-core>
 )
 
 add_library(js_static STATIC)
@@ -85,12 +81,6 @@ set_target_properties(
   PREFIX lib
 )
 
-target_sources(
-  js_static
-  PRIVATE
-    $<TARGET_OBJECTS:jerry-core>
-)
-
 target_link_libraries(
   js_static
   PUBLIC
@@ -100,6 +90,8 @@ target_link_libraries(
     path_static
   PRIVATE
     js
+  PRIVATE
+    $<TARGET_OBJECTS:jerry-core>
 )
 
 install(TARGETS js_shared js_static)
