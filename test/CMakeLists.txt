@@ -204,7 +204,7 @@ foreach(test IN LISTS tests)
   target_link_libraries(
     ${test}
     PRIVATE
-      js_shared
+      js_static
   )
 
   add_test(
