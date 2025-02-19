@@ -422,14 +422,17 @@ static inline void
 js__run_microtasks(js_env_t *env) {
   int err;
 
-  js_handle_scope_t *scope;
-  err = js_open_handle_scope(env, &scope);
-  assert(err == 0);
-
   jerry_value_t value;
 
   for (;;) {
+    js_handle_scope_t *scope;
+    err = js_open_handle_scope(env, &scope);
+    assert(err == 0);
+
     value = jerry_run_jobs();
+
+    err = js_close_handle_scope(env, scope);
+    assert(err == 0);
 
     if (jerry_value_is_exception(value)) {
       js__uncaught_exception(env, value);
@@ -453,9 +456,6 @@ js__run_microtasks(js_env_t *env) {
 
     free(prev);
   }
-
-  err = js_close_handle_scope(env, scope);
-  assert(err == 0);
 }
 
 static inline int
