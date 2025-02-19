@@ -1040,7 +1040,7 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t referrer
 
   jerry_value_free(assertions);
 
-  if (module == NULL) return jerry_value_copy(env->exception);
+  if (env->exception) return jerry_value_copy(env->exception);
 
   return jerry_value_copy(module->handle);
 }
@@ -1114,6 +1114,8 @@ js__on_module_evaluate(const jerry_value_t handle) {
 
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
+
+  if (env->exception) return jerry_value_copy(env->exception);
 
   return 0;
 }
@@ -1234,6 +1236,8 @@ js__on_module_resolve(const jerry_value_t specifier, const jerry_value_t referre
 
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
+
+  if (env->exception) return jerry_value_copy(env->exception);
 
   return jerry_value_copy(resolved->handle);
 }
@@ -2018,6 +2022,8 @@ js_create_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t
 
       return js__error(env);
     }
+
+    jerry_value_free(exception);
   }
 
   *result = js__value_to_abi(error);
@@ -2047,6 +2053,8 @@ js_create_type_error(js_env_t *env, js_value_t *code, js_value_t *message, js_va
 
       return js__error(env);
     }
+
+    jerry_value_free(exception);
   }
 
   *result = js__value_to_abi(error);
@@ -2076,6 +2084,8 @@ js_create_range_error(js_env_t *env, js_value_t *code, js_value_t *message, js_v
 
       return js__error(env);
     }
+
+    jerry_value_free(exception);
   }
 
   *result = js__value_to_abi(error);
@@ -2105,6 +2115,8 @@ js_create_syntax_error(js_env_t *env, js_value_t *code, js_value_t *message, js_
 
       return js__error(env);
     }
+
+    jerry_value_free(exception);
   }
 
   *result = js__value_to_abi(error);
@@ -2738,7 +2750,7 @@ int
 js_is_generator_function(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
-  *result = jerry_value_is_async_function(js__value_from_abi(value));
+  *result = jerry_function_type(js__value_from_abi(value)) == JERRY_FUNCTION_TYPE_GENERATOR;
 
   return 0;
 }
@@ -2871,7 +2883,7 @@ int
 js_is_set(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
-  *result = jerry_container_type(js__value_from_abi(value)) == JERRY_CONTAINER_TYPE_MAP;
+  *result = jerry_container_type(js__value_from_abi(value)) == JERRY_CONTAINER_TYPE_SET;
 
   return 0;
 }
@@ -3416,6 +3428,8 @@ js_set_property(js_env_t *env, js_value_t *object, js_value_t *key, js_value_t *
     return js__error(env);
   }
 
+  jerry_value_free(exception);
+
   return 0;
 }
 
@@ -3531,6 +3545,8 @@ js_set_named_property(js_env_t *env, js_value_t *object, const char *name, js_va
     return js__error(env);
   }
 
+  jerry_value_free(exception);
+
   return 0;
 }
 
@@ -3626,6 +3642,8 @@ js_set_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t *va
 
     return js__error(env);
   }
+
+  jerry_value_free(exception);
 
   return 0;
 }
@@ -4185,6 +4203,8 @@ js_throw_error(js_env_t *env, const char *code, const char *message) {
 
       return js__error(env);
     }
+
+    jerry_value_free(exception);
   }
 
   env->exception = jerry_throw_value(error, true);
@@ -4241,6 +4261,8 @@ js_throw_type_error(js_env_t *env, const char *code, const char *message) {
 
       return js__error(env);
     }
+
+    jerry_value_free(exception);
   }
 
   env->exception = jerry_throw_value(error, true);
@@ -4297,6 +4319,8 @@ js_throw_range_error(js_env_t *env, const char *code, const char *message) {
 
       return js__error(env);
     }
+
+    jerry_value_free(exception);
   }
 
   env->exception = jerry_throw_value(error, true);
@@ -4353,6 +4377,8 @@ js_throw_syntax_error(js_env_t *env, const char *code, const char *message) {
 
       return js__error(env);
     }
+
+    jerry_value_free(exception);
   }
 
   env->exception = jerry_throw_value(error, true);
