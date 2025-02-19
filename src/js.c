@@ -394,6 +394,8 @@ js__uncaught_exception(js_env_t *env, jerry_value_t exception) {
 
 static inline void
 js__unhandled_rejection(js_env_t *env, jerry_value_t promise, jerry_value_t reason) {
+  assert(env->exception == 0);
+
   int err;
 
   if (env->callbacks.unhandled_rejection) {
