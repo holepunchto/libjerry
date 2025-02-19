@@ -861,7 +861,7 @@ js_escape_handle(js_env_t *env, js_escapable_handle_scope_t *scope, js_value_t *
 
   *result = js__value_to_abi(value);
 
-  js__attach_to_handle_scope(env, (js_handle_scope_t *) scope, js__value_to_abi(value));
+  js__attach_to_handle_scope(env, (js_handle_scope_t *) scope, *result);
 
   return 0;
 }
@@ -4425,7 +4425,7 @@ js_get_and_clear_last_exception(js_env_t *env, js_value_t **result) {
 
   *result = exception;
 
-  js__attach_to_handle_scope(env, env->scope, exception);
+  js__attach_to_handle_scope(env, env->scope, *result);
 
   return 0;
 }
