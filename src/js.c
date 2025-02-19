@@ -4446,7 +4446,9 @@ int
 js_terminate_execution(js_env_t *env) {
   // Allow continuing even with a pending exception
 
-  jerry_value_free(jerry_throw_abort(jerry_error_sz(JERRY_ERROR_COMMON, "Execution terminated"), true));
+  jerry_value_free(env->exception);
+
+  env->exception = jerry_throw_abort(jerry_error_sz(JERRY_ERROR_COMMON, "Execution terminated"), true);
 
   return 0;
 }
