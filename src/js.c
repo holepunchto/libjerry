@@ -1467,8 +1467,70 @@ int
 js_define_class(js_env_t *env, const char *name, size_t len, js_function_cb constructor, void *data, js_property_descriptor_t const properties[], size_t properties_len, js_value_t **result) {
   if (env->exception) return js__error(env);
 
-  // TODO
-  abort();
+  int err;
+
+  js_value_t *class;
+  err = js_create_function(env, name, len, constructor, data, &class);
+  assert(err == 0);
+
+  js_value_t *prototype;
+  err = js_create_object(env, &prototype);
+  assert(err == 0);
+
+  jerry_value_t exception = jerry_object_set_proto(js__value_from_abi(class), js__value_from_abi(prototype));
+
+  assert(jerry_value_is_exception(exception) == false);
+
+  jerry_value_free(exception);
+
+  size_t instance_properties_len = 0;
+  size_t static_properties_len = 0;
+
+  for (size_t i = 0; i < properties_len; i++) {
+    const js_property_descriptor_t *property = &properties[i];
+
+    if ((property->attributes & js_static) == 0) {
+      instance_properties_len++;
+    } else {
+      static_properties_len++;
+    }
+  }
+
+  if (instance_properties_len) {
+    js_property_descriptor_t *instance_properties = malloc(sizeof(js_property_descriptor_t) * instance_properties_len);
+
+    for (size_t i = 0, j = 0; i < properties_len; i++) {
+      const js_property_descriptor_t *property = &properties[i];
+
+      if ((property->attributes & js_static) == 0) {
+        instance_properties[j++] = *property;
+      }
+    }
+
+    err = js_define_properties(env, prototype, instance_properties, instance_properties_len);
+    assert(err == 0);
+
+    free(instance_properties);
+  }
+
+  if (static_properties_len) {
+    js_property_descriptor_t *static_properties = malloc(sizeof(js_property_descriptor_t) * static_properties_len);
+
+    for (size_t i = 0, j = 0; i < properties_len; i++) {
+      const js_property_descriptor_t *property = &properties[i];
+
+      if ((property->attributes & js_static) != 0) {
+        static_properties[j++] = *property;
+      }
+    }
+
+    err = js_define_properties(env, class, static_properties, static_properties_len);
+    assert(err == 0);
+
+    free(static_properties);
+  }
+
+  *result = class;
 
   return 0;
 }
@@ -1477,8 +1539,82 @@ int
 js_define_properties(js_env_t *env, js_value_t *object, js_property_descriptor_t const properties[], size_t properties_len) {
   if (env->exception) return js__error(env);
 
-  // TODO
-  abort();
+  int err;
+
+  for (size_t i = 0; i < properties_len; i++) {
+    const js_property_descriptor_t *property = &properties[i];
+
+    uint16_t flags = JERRY_PROP_IS_WRITABLE_DEFINED | JERRY_PROP_IS_ENUMERABLE_DEFINED | JERRY_PROP_IS_CONFIGURABLE_DEFINED;
+
+    if ((property->attributes & js_writable) != 0 || property->getter || property->setter) {
+      flags |= JERRY_PROP_IS_WRITABLE;
+    }
+
+    if ((property->attributes & js_enumerable) != 0) {
+      flags |= JERRY_PROP_IS_ENUMERABLE;
+    }
+
+    if ((property->attributes & js_configurable) != 0) {
+      flags |= JERRY_PROP_IS_CONFIGURABLE;
+    }
+
+    jerry_value_t value, getter, setter;
+
+    if (property->getter || property->setter) {
+      if (property->getter) {
+        flags |= JERRY_PROP_IS_GET_DEFINED;
+
+        js_value_t *fn;
+        err = js_create_function(env, "fn", -1, property->getter, property->data, &fn);
+        assert(err == 0);
+
+        getter = js__value_from_abi(fn);
+      }
+
+      if (property->setter) {
+        flags |= JERRY_PROP_IS_SET_DEFINED;
+
+        js_value_t *fn;
+        err = js_create_function(env, "fn", -1, property->setter, property->data, &fn);
+        assert(err == 0);
+
+        setter = js__value_from_abi(fn);
+      }
+    } else if (property->method) {
+      flags |= JERRY_PROP_IS_VALUE_DEFINED;
+
+      js_value_t *fn;
+      err = js_create_function(env, "fn", -1, property->method, property->data, &fn);
+      assert(err == 0);
+
+      value = js__value_from_abi(fn);
+    } else {
+      flags |= JERRY_PROP_IS_VALUE_DEFINED;
+
+      value = js__value_from_abi(property->value);
+    }
+
+    jerry_property_descriptor_t descriptor = {
+      flags,
+      value,
+      getter,
+      setter,
+    };
+
+    jerry_value_t exception = jerry_object_define_own_prop(js__value_from_abi(object), js__value_from_abi(property->name), &descriptor);
+
+    if (jerry_value_is_exception(exception)) {
+      if (env->depth) {
+        env->exception = exception;
+      } else {
+        js__uncaught_exception(env, exception);
+      }
+
+      return js__error(env);
+    }
+
+    jerry_value_free(exception);
+  }
 
   return 0;
 }
