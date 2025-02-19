@@ -1477,11 +1477,8 @@ js_define_class(js_env_t *env, const char *name, size_t len, js_function_cb cons
   err = js_create_object(env, &prototype);
   assert(err == 0);
 
-  jerry_value_t exception = jerry_object_set_proto(js__value_from_abi(class), js__value_from_abi(prototype));
-
-  assert(jerry_value_is_exception(exception) == false);
-
-  jerry_value_free(exception);
+  err = js_set_named_property(env, class, "prototype", prototype);
+  assert(err == 0);
 
   size_t instance_properties_len = 0;
   size_t static_properties_len = 0;
