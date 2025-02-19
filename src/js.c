@@ -1718,8 +1718,21 @@ int
 js_create_string_utf16le(js_env_t *env, const utf16_t *str, size_t len, js_value_t **result) {
   // Allow continuing even with a pending exception
 
-  // TODO
-  abort();
+  if (len == (size_t) -1) len = wcslen((wchar_t *) str);
+
+  size_t utf8_len = utf8_length_from_utf16le(str, len);
+
+  utf8_t *utf8 = malloc(len);
+
+  utf16le_convert_to_utf8(str, len, utf8);
+
+  jerry_value_t value = jerry_string(utf8, len, JERRY_ENCODING_UTF8);
+
+  free(utf8);
+
+  *result = js__value_to_abi(value);
+
+  js__attach_to_handle_scope(env, env->scope, *result);
 
   return 0;
 }
@@ -1728,8 +1741,21 @@ int
 js_create_string_latin1(js_env_t *env, const latin1_t *str, size_t len, js_value_t **result) {
   // Allow continuing even with a pending exception
 
-  // TODO
-  abort();
+  if (len == (size_t) -1) len = strlen((char *) str);
+
+  size_t utf8_len = utf8_length_from_latin1(str, len);
+
+  utf8_t *utf8 = malloc(len);
+
+  latin1_convert_to_utf8(str, len, utf8);
+
+  jerry_value_t value = jerry_string(str, len, JERRY_ENCODING_UTF8);
+
+  free(utf8);
+
+  *result = js__value_to_abi(value);
+
+  js__attach_to_handle_scope(env, env->scope, *result);
 
   return 0;
 }
