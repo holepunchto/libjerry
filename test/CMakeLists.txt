@@ -196,6 +196,14 @@ list(APPEND skipped_tests
 
   # Not supported
   run-module-async
+
+  # Not implemented
+  call-threadsafe-function-after-release
+  call-threadsafe-function-with-data
+  create-threadsafe-function
+  create-threadsafe-function-with-callback
+  create-threadsafe-function-with-context
+  create-threadsafe-function-with-finalizer
 )
 
 foreach(test IN LISTS tests)
