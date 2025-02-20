@@ -242,7 +242,7 @@ jerry_port_context_alloc(size_t context_size) {
 #ifdef _WIN32
   jerry_context = VirtualAlloc(NULL, jerry_context_heap_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else
-  jerry_context = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  jerry_context = mmap(NULL, jerry_context_heap_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #endif
 
   return jerry_context_heap_size;
