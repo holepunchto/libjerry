@@ -747,12 +747,16 @@ js_destroy_env(js_env_t *env) {
   env->destroying = true;
 
   intrusive_list_for_each(next, &env->teardown_queue.tasks) {
-    js_teardown_task_t *handle = intrusive_entry(next, js_teardown_task_t, list);
+    js_teardown_task_t *task = intrusive_entry(next, js_teardown_task_t, list);
 
-    if (handle->type == js_deferred_teardown) {
-      handle->deferred.cb(&handle->deferred.handle, handle->data);
+    if (task->type == js_deferred_teardown) {
+      task->deferred.cb(&task->deferred.handle, task->data);
     } else {
-      handle->immediate.cb(handle->data);
+      task->immediate.cb(task->data);
+
+      intrusive_list_remove(&env->teardown_queue.tasks, &task->list);
+
+      free(task);
     }
   }
 
@@ -1353,7 +1357,7 @@ js__on_reference_finalize(void *data, jerry_object_native_info_t *info) {
 }
 
 static const jerry_object_native_info_t js__reference = {
-  .free_cb = js__on_reference_finalize
+  .free_cb = js__on_reference_finalize,
 };
 
 static inline void
@@ -1630,10 +1634,12 @@ js__on_wrap_finalize(void *data, jerry_object_native_info_t *info) {
   js_finalizer_t *finalizer = data;
 
   if (finalizer->cb) finalizer->cb(finalizer->env, finalizer->data, finalizer->hint);
+
+  free(finalizer);
 }
 
 static const jerry_object_native_info_t js__wrap = {
-  .free_cb = js__on_wrap_finalize
+  .free_cb = js__on_wrap_finalize,
 };
 
 int
@@ -1800,7 +1806,7 @@ js__on_delegate_own_keys(js_env_t *env, js_callback_info_t *info) {
 }
 
 static const jerry_object_native_info_t js__delegate = {
-  .free_cb = js__on_delegate_finalize
+  .free_cb = js__on_delegate_finalize,
 };
 
 int
@@ -1897,7 +1903,7 @@ js__on_finalizer_finalize(void *data, jerry_object_native_info_t *info) {
 }
 
 static const jerry_object_native_info_t js__finalizer = {
-  .free_cb = js__on_finalizer_finalize
+  .free_cb = js__on_finalizer_finalize,
 };
 
 int
@@ -1928,7 +1934,7 @@ js__on_type_tag_finalize(void *data, jerry_object_native_info_t *info) {
 }
 
 static const jerry_object_native_info_t js__type_tag = {
-  .free_cb = js__on_type_tag_finalize
+  .free_cb = js__on_type_tag_finalize,
 };
 
 int
@@ -2182,7 +2188,7 @@ js__on_function_finalize(void *data, jerry_object_native_info_t *info) {
 }
 
 static const jerry_object_native_info_t js__function = {
-  .free_cb = js__on_function_finalize
+  .free_cb = js__on_function_finalize,
 };
 
 static jerry_value_t
@@ -2346,7 +2352,7 @@ js__on_external_finalize(void *data, jerry_object_native_info_t *info) {
 }
 
 static const jerry_object_native_info_t js__external = {
-  .free_cb = js__on_external_finalize
+  .free_cb = js__on_external_finalize,
 };
 
 int
@@ -4455,6 +4461,8 @@ js_add_teardown_callback(js_env_t *env, js_teardown_cb callback, void *data) {
 int
 js_remove_teardown_callback(js_env_t *env, js_teardown_cb callback, void *data) {
   if (env->exception) return js__error(env);
+
+  if (env->destroying) return 0;
 
   intrusive_list_for_each(next, &env->teardown_queue.tasks) {
     js_teardown_task_t *task = intrusive_entry(next, js_teardown_task_t, list);
