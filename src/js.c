@@ -20,6 +20,12 @@
 #include <uv.h>
 #include <wchar.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#endif
+
 #ifndef thread_local
 #ifdef _WIN32
 #define thread_local __declspec(thread)
@@ -231,11 +237,15 @@ static thread_local jerry_context_t *jerry_context = NULL;
 
 size_t JERRY_ATTR_WEAK
 jerry_port_context_alloc(size_t context_size) {
-  size_t total_size = context_size + jerry_context_heap_size;
+  jerry_context_heap_size += context_size;
 
-  jerry_context = malloc(total_size);
+#ifdef _WIN32
+  jerry_context = VirtualAlloc(NULL, jerry_context_heap_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+  jerry_context = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#endif
 
-  return total_size;
+  return jerry_context_heap_size;
 }
 
 jerry_context_t *JERRY_ATTR_WEAK
@@ -245,7 +255,11 @@ jerry_port_context_get(void) {
 
 void JERRY_ATTR_WEAK
 jerry_port_context_free(void) {
-  free(jerry_context);
+#ifdef _WIN32
+  VirtualFree(jerry_context, jerry_context_heap_size, MEM_RELEASE);
+#else
+  munmap(jerry_context, jerry_context_heap_size);
+#endif
 }
 
 void JERRY_ATTR_WEAK
