@@ -2381,8 +2381,18 @@ int
 js_create_date(js_env_t *env, double time, js_value_t **result) {
   // Allow continuing even with a pending exception
 
-  // TODO
-  abort();
+  jerry_value_t global = jerry_current_realm();
+  jerry_value_t constructor = jerry_object_get_sz(global, "Date");
+  jerry_value_t arg = jerry_number(time);
+  jerry_value_t date = jerry_construct(constructor, &arg, 1);
+
+  jerry_value_free(global);
+  jerry_value_free(constructor);
+  jerry_value_free(arg);
+
+  *result = js__value_to_abi(date);
+
+  js__attach_to_handle_scope(env, env->scope, *result);
 
   return 0;
 }
@@ -3636,8 +3646,11 @@ int
 js_get_value_date(js_env_t *env, js_value_t *value, double *result) {
   // Allow continuing even with a pending exception
 
-  // TODO
-  abort();
+  jerry_value_t number = jerry_value_to_number(js__value_from_abi(value));
+
+  *result = jerry_value_as_number(number);
+
+  jerry_value_free(number);
 
   return 0;
 }
