@@ -237,6 +237,8 @@ static thread_local jerry_context_t *jerry_context = NULL;
 
 size_t JERRY_ATTR_WEAK
 jerry_port_context_alloc(size_t context_size) {
+  if (jerry_context_heap_size > UINT32_MAX) jerry_context_heap_size = UINT32_MAX;
+
   jerry_context_heap_size += context_size;
 
 #ifdef _WIN32
