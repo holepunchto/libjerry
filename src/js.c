@@ -87,12 +87,11 @@ struct js_env_s {
   uv_async_t teardown;
   int active_handles;
 
-  uint32_t refs;
-
   js_platform_t *platform;
   js_handle_scope_t *scope;
   js_context_t *context;
 
+  uint32_t refs;
   uint32_t depth;
 
   jerry_value_t bindings;
@@ -701,17 +700,24 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
 
   env->loop = loop;
   env->active_handles = 3;
-  env->refs = 0;
+
   env->platform = platform;
   env->scope = NULL;
+
   env->context = malloc(sizeof(js_context_t));
   env->context->realm = jerry_current_realm();
   env->context->previous = NULL;
+
+  env->refs = 0;
   env->depth = 0;
+
   env->bindings = jerry_object();
   env->exception = 0;
+
   env->external_memory = 0;
+
   env->destroying = false;
+
   env->promise_rejections = NULL;
 
   intrusive_list_init(&env->teardown_queue.tasks);
