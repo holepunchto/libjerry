@@ -244,7 +244,11 @@ jerry_port_context_alloc(size_t context_size) {
   jerry_context = VirtualAlloc(NULL, jerry_context_heap_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else
   jerry_context = mmap(NULL, jerry_context_heap_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+  if (jerry_context == MAP_FAILED) jerry_context = NULL;
 #endif
+
+  assert(jerry_context);
 
   return jerry_context_heap_size;
 }
