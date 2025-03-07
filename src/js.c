@@ -230,11 +230,11 @@ struct js_promise_rejection_s {
   js_promise_rejection_t *next;
 };
 
-static thread_local size_t jerry_context_heap_size;
+static thread_local uint64_t jerry_context_heap_size;
 
 static thread_local jerry_context_t *jerry_context = NULL;
 
-size_t JERRY_ATTR_WEAK
+size_t
 jerry_port_context_alloc(size_t context_size) {
   if (jerry_context_heap_size > UINT32_MAX) jerry_context_heap_size = UINT32_MAX;
 
@@ -249,12 +249,12 @@ jerry_port_context_alloc(size_t context_size) {
   return jerry_context_heap_size;
 }
 
-jerry_context_t *JERRY_ATTR_WEAK
+jerry_context_t *
 jerry_port_context_get(void) {
   return jerry_context;
 }
 
-void JERRY_ATTR_WEAK
+void
 jerry_port_context_free(void) {
 #ifdef _WIN32
   VirtualFree(jerry_context, jerry_context_heap_size, MEM_RELEASE);
@@ -263,25 +263,25 @@ jerry_port_context_free(void) {
 #endif
 }
 
-void JERRY_ATTR_WEAK
+void
 jerry_port_init(void) {}
 
-void JERRY_ATTR_WEAK
+void
 jerry_port_fatal(jerry_fatal_code_t code) {
   abort();
 }
 
-void JERRY_ATTR_WEAK
+void
 jerry_port_log(const char *message) {
   fputs(message, stderr);
 }
 
-int32_t JERRY_ATTR_WEAK
+int32_t
 jerry_port_local_tza(double ms) {
   return ms;
 }
 
-double JERRY_ATTR_WEAK
+double
 jerry_port_current_time(void) {
   int err;
 
@@ -292,7 +292,7 @@ jerry_port_current_time(void) {
   return ((double) tv.tv_sec) * 1000.0 + ((double) tv.tv_usec) / 1000.0;
 }
 
-jerry_char_t *JERRY_ATTR_WEAK
+jerry_char_t *
 jerry_port_path_normalize(const jerry_char_t *path, jerry_size_t len) {
   int err;
 
@@ -309,12 +309,12 @@ jerry_port_path_normalize(const jerry_char_t *path, jerry_size_t len) {
   return result;
 }
 
-void JERRY_ATTR_WEAK
+void
 jerry_port_path_free(jerry_char_t *path) {
   free(path);
 }
 
-jerry_size_t JERRY_ATTR_WEAK
+jerry_size_t
 jerry_port_path_base(const jerry_char_t *path) {
   int err;
 
@@ -325,12 +325,12 @@ jerry_port_path_base(const jerry_char_t *path) {
   return dirname + 1;
 }
 
-jerry_char_t *JERRY_ATTR_WEAK
+jerry_char_t *
 jerry_port_source_read(const char *path, jerry_size_t *len) {
   return NULL;
 }
 
-void JERRY_ATTR_WEAK
+void
 jerry_port_source_free(uint8_t *buffer) {
   free(buffer);
 }
