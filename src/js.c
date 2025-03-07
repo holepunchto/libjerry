@@ -684,7 +684,7 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
     if (total_memory > 0) {
       jerry_context_heap_size = total_memory;
     } else {
-      jerry_context_heap_size = 24 * 1024 * 1024;
+      jerry_context_heap_size = 8 * 1024 * 1024;
     }
   }
 
