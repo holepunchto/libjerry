@@ -340,7 +340,7 @@ jerry_port_source_free(uint8_t *buffer) {
 }
 
 static inline jerry_value_t
-js__value_from_abi(js_value_t *value) {
+js__value_from_abi(const js_value_t *value) {
   return (jerry_value_t) (uintptr_t) value;
 }
 
@@ -3682,10 +3682,82 @@ js_get_value_date(js_env_t *env, js_value_t *value, double *result) {
 }
 
 int
-js_get_array_length(js_env_t *env, js_value_t *value, uint32_t *result) {
+js_get_array_length(js_env_t *env, js_value_t *array, uint32_t *result) {
   // Allow continuing even with a pending exception
 
-  *result = jerry_array_length(js__value_from_abi(value));
+  *result = jerry_array_length(js__value_from_abi(array));
+
+  return 0;
+}
+
+int
+js_get_array_elements(js_env_t *env, js_value_t *array, js_value_t **elements, size_t len, size_t offset, uint32_t *result) {
+  if (env->exception) return js__error(env);
+
+  uint32_t written = 0;
+
+  env->depth++;
+
+  for (uint32_t i = 0, n = len, j = offset, m = jerry_array_length(js__value_from_abi(array)); i < n && j < m; i++, j++) {
+    jerry_value_t value = jerry_object_get_index(js__value_from_abi(array), j);
+
+    if (jerry_value_is_exception(value)) {
+      if (env->depth == 1) js__run_microtasks(env);
+
+      env->depth--;
+
+      if (env->depth) {
+        env->exception = value;
+      } else {
+        js__uncaught_exception(env, value);
+      }
+
+      return js__error(env);
+    }
+
+    elements[i] = js__value_to_abi(value);
+
+    written++;
+  }
+
+  if (env->depth == 1) js__run_microtasks(env);
+
+  env->depth--;
+
+  if (result) *result = written;
+
+  return 0;
+}
+
+int
+js_set_array_elements(js_env_t *env, js_value_t *array, const js_value_t *elements[], size_t len, size_t offset) {
+  if (env->exception) return js__error(env);
+
+  env->depth++;
+
+  for (uint32_t i = 0, n = len, j = offset; i < n; i++, j++) {
+    jerry_value_t exception = jerry_object_set_index(js__value_from_abi(array), j, js__value_from_abi(elements[i]));
+
+    if (jerry_value_is_exception(exception)) {
+      if (env->depth == 1) js__run_microtasks(env);
+
+      env->depth--;
+
+      if (env->depth) {
+        env->exception = exception;
+      } else {
+        js__uncaught_exception(env, exception);
+      }
+
+      return js__error(env);
+    }
+
+    jerry_value_free(exception);
+  }
+
+  if (env->depth == 1) js__run_microtasks(env);
+
+  env->depth--;
 
   return 0;
 }
