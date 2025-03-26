@@ -3717,6 +3717,8 @@ js_get_array_elements(js_env_t *env, js_value_t *array, js_value_t **elements, s
 
     elements[i] = js__value_to_abi(value);
 
+    js__attach_to_handle_scope(env, env->scope, elements[i]);
+
     written++;
   }
 
