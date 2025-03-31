@@ -694,7 +694,7 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
 
   jerry_arraybuffer_allocator(js__on_arraybuffer_allocate, js__on_arraybuffer_free, env);
 
-  jerry_arraybuffer_heap_allocation_limit(0);
+  jerry_arraybuffer_heap_allocation_limit(64);
 
   jerry_promise_on_event(JERRY_PROMISE_EVENT_FILTER_ERROR, js__on_promise_event, env);
 
