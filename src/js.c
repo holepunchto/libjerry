@@ -483,6 +483,8 @@ js__run_microtasks(js_env_t *env) {
     next = next->next;
 
     free(prev);
+
+    js__run_microtasks(env);
   }
 }
 
