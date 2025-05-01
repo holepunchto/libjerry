@@ -3810,6 +3810,72 @@ js_get_property_names(js_env_t *env, js_value_t *object, js_value_t **result) {
 }
 
 int
+js_get_filtered_property_names(js_env_t *env, js_value_t *object, js_key_collection_mode_t mode, js_property_filter_t property_filter, js_index_filter_t index_filter, js_key_conversion_mode_t key_conversion, js_value_t **result) {
+  if (env->exception) return js__error(env);
+
+  int filter = JERRY_PROPERTY_FILTER_ALL;
+
+  if (mode == js_key_include_prototypes) {
+    filter |= JERRY_PROPERTY_FILTER_TRAVERSE_PROTOTYPE_CHAIN;
+  }
+
+  if (property_filter & js_property_only_writable) {
+    filter |= JERRY_PROPERTY_FILTER_EXCLUDE_NON_WRITABLE;
+  }
+
+  if (property_filter & js_property_only_enumerable) {
+    filter |= JERRY_PROPERTY_FILTER_EXCLUDE_NON_ENUMERABLE;
+  }
+
+  if (property_filter & js_property_only_configurable) {
+    filter |= JERRY_PROPERTY_FILTER_EXCLUDE_NON_CONFIGURABLE;
+  }
+
+  if (property_filter & js_property_skip_strings) {
+    filter |= JERRY_PROPERTY_FILTER_EXCLUDE_STRINGS;
+  }
+
+  if (property_filter & js_property_skip_symbols) {
+    filter |= JERRY_PROPERTY_FILTER_EXCLUDE_SYMBOLS;
+  }
+
+  if (index_filter == js_index_skip_indices) {
+    filter |= JERRY_PROPERTY_FILTER_EXCLUDE_INTEGER_INDICES;
+  }
+
+  if (key_conversion == js_key_keep_numbers) {
+    filter |= JERRY_PROPERTY_FILTER_INTEGER_INDICES_AS_NUMBER;
+  }
+
+  env->depth++;
+
+  jerry_value_t value = jerry_object_property_names(js__value_from_abi(object), (jerry_property_filter_t) filter);
+
+  if (env->depth == 1) js__run_microtasks(env);
+
+  env->depth--;
+
+  if (jerry_value_is_exception(value)) {
+    if (env->depth) {
+      env->exception = value;
+    } else {
+      js__uncaught_exception(env, value);
+    }
+
+    return js__error(env);
+  }
+
+  if (result == NULL) jerry_value_free(value);
+  else {
+    *result = js__value_to_abi(value);
+
+    js__attach_to_handle_scope(env, env->scope, *result);
+  }
+
+  return 0;
+}
+
+int
 js_get_property(js_env_t *env, js_value_t *object, js_value_t *key, js_value_t **result) {
   if (env->exception) return js__error(env);
 
