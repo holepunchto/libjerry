@@ -980,7 +980,16 @@ int
 js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_t *source, js_value_t **result) {
   if (env->exception) return js__error(env);
 
+  int err;
+
   if (len == (size_t) -1) len = strlen(file);
+
+  if (len > UINT32_MAX) {
+    err = js_throw_range_error(env, NULL, "String allocation failed");
+    assert(err == 0);
+
+    return js__error(env);
+  }
 
   jerry_value_t source_name = jerry_string((const jerry_char_t *) file, len, JERRY_ENCODING_UTF8);
 
@@ -1104,7 +1113,16 @@ int
 js_create_module(js_env_t *env, const char *name, size_t len, int offset, js_value_t *source, js_module_meta_cb cb, void *data, js_module_t **result) {
   if (env->exception) return js__error(env);
 
+  int err;
+
   if (len == (size_t) -1) len = strlen(name);
+
+  if (len > UINT32_MAX) {
+    err = js_throw_range_error(env, NULL, "String allocation failed");
+    assert(err == 0);
+
+    return js__error(env);
+  }
 
   jerry_value_t source_name = jerry_string((const jerry_char_t *) name, len, JERRY_ENCODING_UTF8);
 
@@ -2076,9 +2094,16 @@ js_create_bigint_uint64(js_env_t *env, uint64_t value, js_value_t **result) {
 
 int
 js_create_string_utf8(js_env_t *env, const utf8_t *str, size_t len, js_value_t **result) {
-  // Allow continuing even with a pending exception
+  int err;
 
   if (len == (size_t) -1) len = strlen((const char *) str);
+
+  if (len > UINT32_MAX) {
+    err = js_throw_range_error(env, NULL, "String allocation failed");
+    assert(err == 0);
+
+    return js__error(env);
+  }
 
   jerry_value_t value = jerry_string(str, len, JERRY_ENCODING_UTF8);
 
@@ -2091,17 +2116,24 @@ js_create_string_utf8(js_env_t *env, const utf8_t *str, size_t len, js_value_t *
 
 int
 js_create_string_utf16le(js_env_t *env, const utf16_t *str, size_t len, js_value_t **result) {
-  // Allow continuing even with a pending exception
+  int err;
 
   if (len == (size_t) -1) len = wcslen((wchar_t *) str);
 
   size_t utf8_len = utf8_length_from_utf16le(str, len);
 
+  if (utf8_len > UINT32_MAX) {
+    err = js_throw_range_error(env, NULL, "String allocation failed");
+    assert(err == 0);
+
+    return js__error(env);
+  }
+
   utf8_t *utf8 = malloc(utf8_len);
 
   utf16le_convert_to_utf8(str, len, utf8);
 
-  jerry_value_t value = jerry_string(utf8, len, JERRY_ENCODING_UTF8);
+  jerry_value_t value = jerry_string(utf8, utf8_len, JERRY_ENCODING_UTF8);
 
   free(utf8);
 
@@ -2114,17 +2146,24 @@ js_create_string_utf16le(js_env_t *env, const utf16_t *str, size_t len, js_value
 
 int
 js_create_string_latin1(js_env_t *env, const latin1_t *str, size_t len, js_value_t **result) {
-  // Allow continuing even with a pending exception
+  int err;
 
   if (len == (size_t) -1) len = strlen((char *) str);
 
   size_t utf8_len = utf8_length_from_latin1(str, len);
 
+  if (utf8_len > UINT32_MAX) {
+    err = js_throw_range_error(env, NULL, "String allocation failed");
+    assert(err == 0);
+
+    return js__error(env);
+  }
+
   utf8_t *utf8 = malloc(utf8_len);
 
   latin1_convert_to_utf8(str, len, utf8);
 
-  jerry_value_t value = jerry_string(str, len, JERRY_ENCODING_UTF8);
+  jerry_value_t value = jerry_string(utf8, utf8_len, JERRY_ENCODING_UTF8);
 
   free(utf8);
 
@@ -2137,11 +2176,9 @@ js_create_string_latin1(js_env_t *env, const latin1_t *str, size_t len, js_value
 
 int
 js_create_external_string_utf8(js_env_t *env, utf8_t *str, size_t len, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result, bool *copied) {
-  // Allow continuing even with a pending exception
-
   int err;
   err = js_create_string_utf8(env, str, len, result);
-  assert(err == 0);
+  if (err < 0) return err;
 
   if (copied) *copied = true;
 
@@ -2152,11 +2189,9 @@ js_create_external_string_utf8(js_env_t *env, utf8_t *str, size_t len, js_finali
 
 int
 js_create_external_string_utf16le(js_env_t *env, utf16_t *str, size_t len, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result, bool *copied) {
-  // Allow continuing even with a pending exception
-
   int err;
   err = js_create_string_utf16le(env, str, len, result);
-  assert(err == 0);
+  if (err < 0) return err;
 
   if (copied) *copied = true;
 
@@ -2167,11 +2202,9 @@ js_create_external_string_utf16le(js_env_t *env, utf16_t *str, size_t len, js_fi
 
 int
 js_create_external_string_latin1(js_env_t *env, latin1_t *str, size_t len, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result, bool *copied) {
-  // Allow continuing even with a pending exception
-
   int err;
   err = js_create_string_latin1(env, str, len, result);
-  assert(err == 0);
+  if (err < 0) return err;
 
   if (copied) *copied = true;
 
@@ -2290,7 +2323,16 @@ int
 js_create_function_with_source(js_env_t *env, const char *name, size_t name_len, const char *file, size_t file_len, js_value_t *const args[], size_t args_len, int offset, js_value_t *source, js_value_t **result) {
   if (env->exception) return js__error(env);
 
+  int err;
+
   if (file_len == (size_t) -1) file_len = strlen(file);
+
+  if (file_len > UINT32_MAX) {
+    err = js_throw_range_error(env, NULL, "String allocation failed");
+    assert(err == 0);
+
+    return js__error(env);
+  }
 
   size_t buf_len = 0;
 
