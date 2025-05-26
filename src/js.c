@@ -6,6 +6,7 @@
 #include <jerryscript-types.h>
 #include <jerryscript.h>
 #include <js.h>
+#include <limits.h>
 #include <math.h>
 #include <path.h>
 #include <stdarg.h>
@@ -381,6 +382,14 @@ js_get_platform_identifier(js_platform_t *platform, const char **result) {
 int
 js_get_platform_version(js_platform_t *platform, const char **result) {
   *result = js__platform_version;
+
+  return 0;
+}
+
+int
+js_get_platform_limits(js_platform_t *platform, js_platform_limits_t *result) {
+  result->arraybuffer_length = UINT32_MAX;
+  result->string_length = UINT32_MAX;
 
   return 0;
 }
