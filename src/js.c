@@ -1419,7 +1419,7 @@ static inline void
 js__set_weak_reference(js_env_t *env, js_ref_t *reference) {
   if (reference->value == 0) return;
 
-  if (jerry_value_is_object(reference->value) || jerry_value_is_function(reference->value)) {
+  if (jerry_value_is_object(reference->value)) {
     jerry_value_t description = jerry_string_sz("reference");
 
     reference->symbol = jerry_symbol_with_description(description);
@@ -1442,7 +1442,7 @@ static inline void
 js__clear_weak_reference(js_env_t *env, js_ref_t *reference) {
   if (reference->value == 0) return;
 
-  if (jerry_value_is_object(reference->value) || jerry_value_is_function(reference->value)) {
+  if (jerry_value_is_object(reference->value)) {
     reference->value = jerry_value_copy(reference->value);
 
     jerry_value_t external = jerry_object_get_internal(reference->value, reference->symbol);
