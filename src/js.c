@@ -153,6 +153,7 @@ struct js_ref_s {
   jerry_value_t value;
   uint32_t count;
   jerry_value_t symbol;
+  bool finalized;
 };
 
 struct js_deferred_s {
@@ -1409,6 +1410,7 @@ js__on_reference_finalize(void *data, jerry_object_native_info_t *info) {
   reference->value = 0;
   reference->count = 0;
   reference->symbol = 0;
+  reference->finalized = true;
 }
 
 static const jerry_object_native_info_t js__reference = {
@@ -1417,7 +1419,7 @@ static const jerry_object_native_info_t js__reference = {
 
 static inline void
 js__set_weak_reference(js_env_t *env, js_ref_t *reference) {
-  if (reference->value == 0) return;
+  if (reference->finalized) return;
 
   if (jerry_value_is_object(reference->value)) {
     jerry_value_t description = jerry_string_sz("reference");
@@ -1440,7 +1442,7 @@ js__set_weak_reference(js_env_t *env, js_ref_t *reference) {
 
 static inline void
 js__clear_weak_reference(js_env_t *env, js_ref_t *reference) {
-  if (reference->value == 0) return;
+  if (reference->finalized) return;
 
   if (jerry_value_is_object(reference->value)) {
     reference->value = jerry_value_copy(reference->value);
@@ -1468,6 +1470,7 @@ js_create_reference(js_env_t *env, js_value_t *value, uint32_t count, js_ref_t *
   reference->value = jerry_value_copy(js__value_from_abi(value));
   reference->count = count;
   reference->symbol = 0;
+  reference->finalized = false;
 
   if (reference->count == 0) js__set_weak_reference(env, reference);
 
@@ -1521,7 +1524,7 @@ int
 js_get_reference_value(js_env_t *env, js_ref_t *reference, js_value_t **result) {
   // Allow continuing even with a pending exception
 
-  if (reference->value == 0) *result = NULL;
+  if (reference->finalized) *result = NULL;
   else {
     *result = js__value_to_abi(jerry_value_copy(reference->value));
 
