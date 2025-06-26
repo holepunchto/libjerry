@@ -1,0 +1,173 @@
+diff --git a/jerry-core/api/jerryscript.c b/jerry-core/api/jerryscript.c
+index d8174b92c0..e1b453c1d8 100644
+--- a/jerry-core/api/jerryscript.c
++++ b/jerry-core/api/jerryscript.c
+@@ -82,7 +82,7 @@ JERRY_STATIC_ASSERT ((int) ECMA_PROMISE_IS_PENDING == (int) JERRY_PROMISE_STATE_
+ /**
+  * Offset between internal and external arithmetic operator types
+  */
+-#define ECMA_NUMBER_ARITHMETIC_OP_API_OFFSET (JERRY_BIN_OP_SUB - NUMBER_ARITHMETIC_SUBTRACTION)
++#define ECMA_NUMBER_ARITHMETIC_OP_API_OFFSET ((number_arithmetic_op) JERRY_BIN_OP_SUB - NUMBER_ARITHMETIC_SUBTRACTION)
+ 
+ JERRY_STATIC_ASSERT (((NUMBER_ARITHMETIC_SUBTRACTION + ECMA_NUMBER_ARITHMETIC_OP_API_OFFSET) == JERRY_BIN_OP_SUB)
+                        && ((NUMBER_ARITHMETIC_MULTIPLICATION + ECMA_NUMBER_ARITHMETIC_OP_API_OFFSET)
+@@ -4849,7 +4849,7 @@ jerry_symbol (jerry_well_known_symbol_t symbol) /**< jerry_well_known_symbol_t e
+ {
+   jerry_assert_api_enabled ();
+ 
+-  lit_magic_string_id_t id = (lit_magic_string_id_t) (LIT_GLOBAL_SYMBOL__FIRST + symbol);
++  lit_magic_string_id_t id = (lit_magic_string_id_t) (LIT_GLOBAL_SYMBOL__FIRST + (lit_magic_string_id_t) symbol);
+ 
+   if (!LIT_IS_GLOBAL_SYMBOL (id))
+   {
+diff --git a/jerry-core/ecma/builtin-objects/ecma-builtin-regexp-prototype.c b/jerry-core/ecma/builtin-objects/ecma-builtin-regexp-prototype.c
+index 94c0384dd8..401fa7c127 100644
+--- a/jerry-core/ecma/builtin-objects/ecma-builtin-regexp-prototype.c
++++ b/jerry-core/ecma/builtin-objects/ecma-builtin-regexp-prototype.c
+@@ -248,10 +248,11 @@ ecma_builtin_regexp_prototype_compile (ecma_value_t this_arg, /**< this */
+ 
+   if (!ECMA_IS_VALUE_ERROR (ret_value))
+   {
+-    ecma_value_t status = ecma_builtin_helper_def_prop (this_obj_p,
+-                                                        ecma_get_magic_string (LIT_MAGIC_STRING_LASTINDEX_UL),
+-                                                        ecma_make_uint32_value (0),
+-                                                        ECMA_PROPERTY_FLAG_WRITABLE | JERRY_PROP_SHOULD_THROW);
++    ecma_value_t status =
++      ecma_builtin_helper_def_prop (this_obj_p,
++                                    ecma_get_magic_string (LIT_MAGIC_STRING_LASTINDEX_UL),
++                                    ecma_make_uint32_value (0),
++                                    (uint32_t) ECMA_PROPERTY_FLAG_WRITABLE | JERRY_PROP_SHOULD_THROW);
+ 
+     ecma_bytecode_deref ((ecma_compiled_code_t *) old_bc_p);
+ 
+diff --git a/jerry-core/ecma/operations/ecma-bigint.c b/jerry-core/ecma/operations/ecma-bigint.c
+index 7a4464e0c9..70ab51ae42 100644
+--- a/jerry-core/ecma/operations/ecma-bigint.c
++++ b/jerry-core/ecma/operations/ecma-bigint.c
+@@ -1584,20 +1584,20 @@ ecma_bigint_and (ecma_value_t left_value, /**< left BigInt value */
+     }
+ 
+     /* x & (-y) == x & ~(y-1) == x &~ (y-1) */
+-    uint32_t operation_and_options = ECMA_BIG_UINT_BITWISE_AND_NOT | ECMA_BIG_UINT_BITWISE_DECREASE_RIGHT;
++    uint32_t operation_and_options = (uint32_t) ECMA_BIG_UINT_BITWISE_AND_NOT | ECMA_BIG_UINT_BITWISE_DECREASE_RIGHT;
+     return ecma_bigint_bitwise_op (operation_and_options, left_p, right_p);
+   }
+ 
+   if (!(right_p->u.bigint_sign_and_size & ECMA_BIGINT_SIGN))
+   {
+     /* (-x) & y == ~(x-1) & y == y &~ (x-1) */
+-    uint32_t operation_and_options = ECMA_BIG_UINT_BITWISE_AND_NOT | ECMA_BIG_UINT_BITWISE_DECREASE_RIGHT;
++    uint32_t operation_and_options = (uint32_t) ECMA_BIG_UINT_BITWISE_AND_NOT | ECMA_BIG_UINT_BITWISE_DECREASE_RIGHT;
+     return ecma_bigint_bitwise_op (operation_and_options, right_p, left_p);
+   }
+ 
+   /* (-x) & (-y) == ~(x-1) & ~(y-1) == ~((x-1) | (y-1)) == -(((x-1) | (y-1)) + 1) */
+   uint32_t operation_and_options =
+-    (ECMA_BIG_UINT_BITWISE_OR | ECMA_BIG_UINT_BITWISE_DECREASE_BOTH | ECMA_BIG_UINT_BITWISE_INCREASE_RESULT);
++    (uint32_t) ECMA_BIG_UINT_BITWISE_OR | ECMA_BIG_UINT_BITWISE_DECREASE_BOTH | ECMA_BIG_UINT_BITWISE_INCREASE_RESULT;
+   return ecma_bigint_bitwise_op (operation_and_options, left_p, right_p);
+ } /* ecma_bigint_and */
+ 
+@@ -1632,22 +1632,22 @@ ecma_bigint_or (ecma_value_t left_value, /**< left BigInt value */
+     }
+ 
+     /* x | (-y) == x | ~(y-1) == ~((y-1) &~ x) == -(((y-1) &~ x) + 1) */
+-    uint32_t operation_and_options =
+-      (ECMA_BIG_UINT_BITWISE_AND_NOT | ECMA_BIG_UINT_BITWISE_DECREASE_LEFT | ECMA_BIG_UINT_BITWISE_INCREASE_RESULT);
++    uint32_t operation_and_options = (uint32_t) ECMA_BIG_UINT_BITWISE_AND_NOT | ECMA_BIG_UINT_BITWISE_DECREASE_LEFT
++                                     | ECMA_BIG_UINT_BITWISE_INCREASE_RESULT;
+     return ecma_bigint_bitwise_op (operation_and_options, right_p, left_p);
+   }
+ 
+   if (!(right_p->u.bigint_sign_and_size & ECMA_BIGINT_SIGN))
+   {
+     /* (-x) | y == ~(x-1) | y == ~((x-1) &~ y) == -(((x-1) &~ y) + 1) */
+-    uint32_t operation_and_options =
+-      (ECMA_BIG_UINT_BITWISE_AND_NOT | ECMA_BIG_UINT_BITWISE_DECREASE_LEFT | ECMA_BIG_UINT_BITWISE_INCREASE_RESULT);
++    uint32_t operation_and_options = (uint32_t) ECMA_BIG_UINT_BITWISE_AND_NOT | ECMA_BIG_UINT_BITWISE_DECREASE_LEFT
++                                     | ECMA_BIG_UINT_BITWISE_INCREASE_RESULT;
+     return ecma_bigint_bitwise_op (operation_and_options, left_p, right_p);
+   }
+ 
+   /* (-x) | (-y) == ~(x-1) | ~(y-1) == ~((x-1) & (y-1)) = -(((x-1) & (y-1)) + 1) */
+   uint32_t operation_and_options =
+-    (ECMA_BIG_UINT_BITWISE_AND | ECMA_BIG_UINT_BITWISE_DECREASE_BOTH | ECMA_BIG_UINT_BITWISE_INCREASE_RESULT);
++    (uint32_t) ECMA_BIG_UINT_BITWISE_AND | ECMA_BIG_UINT_BITWISE_DECREASE_BOTH | ECMA_BIG_UINT_BITWISE_INCREASE_RESULT;
+   return ecma_bigint_bitwise_op (operation_and_options, left_p, right_p);
+ } /* ecma_bigint_or */
+ 
+@@ -1682,21 +1682,21 @@ ecma_bigint_xor (ecma_value_t left_value, /**< left BigInt value */
+     }
+ 
+     /* x ^ (-y) == x ^ ~(y-1) == ~(x ^ (y-1)) == -((x ^ (y-1)) + 1) */
+-    uint32_t operation_and_options =
+-      (ECMA_BIG_UINT_BITWISE_XOR | ECMA_BIG_UINT_BITWISE_DECREASE_RIGHT | ECMA_BIG_UINT_BITWISE_INCREASE_RESULT);
++    uint32_t operation_and_options = (uint32_t) ECMA_BIG_UINT_BITWISE_XOR | ECMA_BIG_UINT_BITWISE_DECREASE_RIGHT
++                                     | ECMA_BIG_UINT_BITWISE_INCREASE_RESULT;
+     return ecma_bigint_bitwise_op (operation_and_options, left_p, right_p);
+   }
+ 
+   if (!(right_p->u.bigint_sign_and_size & ECMA_BIGINT_SIGN))
+   {
+     /* (-x) | y == ~(x-1) ^ y == ~((x-1) ^ y) == -(((x-1) ^ y) + 1) */
+-    uint32_t operation_and_options =
+-      (ECMA_BIG_UINT_BITWISE_XOR | ECMA_BIG_UINT_BITWISE_DECREASE_LEFT | ECMA_BIG_UINT_BITWISE_INCREASE_RESULT);
++    uint32_t operation_and_options = (uint32_t) ECMA_BIG_UINT_BITWISE_XOR | ECMA_BIG_UINT_BITWISE_DECREASE_LEFT
++                                     | ECMA_BIG_UINT_BITWISE_INCREASE_RESULT;
+     return ecma_bigint_bitwise_op (operation_and_options, left_p, right_p);
+   }
+ 
+   /* (-x) ^ (-y) == ~(x-1) ^ ~(y-1) == (x-1) ^ (y-1) */
+-  uint32_t operation_and_options = ECMA_BIG_UINT_BITWISE_XOR | ECMA_BIG_UINT_BITWISE_DECREASE_BOTH;
++  uint32_t operation_and_options = (uint32_t) ECMA_BIG_UINT_BITWISE_XOR | ECMA_BIG_UINT_BITWISE_DECREASE_BOTH;
+   return ecma_bigint_bitwise_op (operation_and_options, left_p, right_p);
+ } /* ecma_bigint_xor */
+ 
+diff --git a/jerry-core/ecma/operations/ecma-regexp-object.c b/jerry-core/ecma/operations/ecma-regexp-object.c
+index e5b276aeae..6e49b7ceb3 100644
+--- a/jerry-core/ecma/operations/ecma-regexp-object.c
++++ b/jerry-core/ecma/operations/ecma-regexp-object.c
+@@ -164,7 +164,7 @@ ecma_op_regexp_alloc (ecma_object_t *ctr_obj_p) /**< constructor object pointer
+   ecma_value_t status = ecma_builtin_helper_def_prop (new_object_p,
+                                                       ecma_get_magic_string (LIT_MAGIC_STRING_LASTINDEX_UL),
+                                                       ecma_make_uint32_value (0),
+-                                                      ECMA_PROPERTY_FLAG_WRITABLE | JERRY_PROP_SHOULD_THROW);
++                                                      (uint32_t) ECMA_PROPERTY_FLAG_WRITABLE | JERRY_PROP_SHOULD_THROW);
+ 
+   JERRY_ASSERT (ecma_is_value_true (status));
+ 
+diff --git a/jerry-core/ecma/operations/ecma-typedarray-object.c b/jerry-core/ecma/operations/ecma-typedarray-object.c
+index 40b42bb6cf..2d99fd2800 100644
+--- a/jerry-core/ecma/operations/ecma-typedarray-object.c
++++ b/jerry-core/ecma/operations/ecma-typedarray-object.c
+@@ -741,7 +741,7 @@ ecma_typedarray_helper_is_typedarray (ecma_builtin_id_t builtin_id) /**< the bui
+ ecma_builtin_id_t
+ ecma_typedarray_helper_get_prototype_id (ecma_typedarray_type_t typedarray_id) /**< the id of the typedarray **/
+ {
+-  return (ecma_builtin_id_t) (ECMA_FIRST_TYPEDARRAY_BUILTIN_PROTOTYPE_ID + typedarray_id);
++  return (ecma_builtin_id_t) (ECMA_FIRST_TYPEDARRAY_BUILTIN_PROTOTYPE_ID + (ecma_builtin_id_t) typedarray_id);
+ } /* ecma_typedarray_helper_get_prototype_id */
+ 
+ /**
+@@ -752,7 +752,7 @@ ecma_typedarray_helper_get_prototype_id (ecma_typedarray_type_t typedarray_id) /
+ ecma_builtin_id_t
+ ecma_typedarray_helper_get_constructor_id (ecma_typedarray_type_t typedarray_id) /**< the id of the typedarray **/
+ {
+-  return (ecma_builtin_id_t) (ECMA_FIRST_TYPEDARRAY_BUILTIN_ROUTINE_ID + typedarray_id);
++  return (ecma_builtin_id_t) (ECMA_FIRST_TYPEDARRAY_BUILTIN_ROUTINE_ID + (ecma_builtin_id_t) typedarray_id);
+ } /* ecma_typedarray_helper_get_constructor_id */
+ 
+ /**
+diff --git a/jerry-core/vm/vm.c b/jerry-core/vm/vm.c
+index b6e1e88fb8..d0f8c2b3a2 100644
+--- a/jerry-core/vm/vm.c
++++ b/jerry-core/vm/vm.c
+@@ -235,7 +235,7 @@ vm_op_set_value (ecma_value_t base, /**< base object */
+ } /* vm_op_set_value */
+ 
+ /** Compact bytecode define */
+-#define CBC_OPCODE(arg1, arg2, arg3, arg4) arg4,
++#define CBC_OPCODE(arg1, arg2, arg3, arg4) (uint16_t) arg4,
+ 
+ /**
+  * Decode table for both opcodes and extended opcodes.

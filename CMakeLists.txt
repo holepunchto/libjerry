@@ -19,7 +19,12 @@ set(JERRY_ERROR_MESSAGES ON CACHE BOOL "Enable error message support" FORCE)
 set(JERRY_CPOINTER_32_BIT ON CACHE BOOL "Enable 32-bit pointer support" FORCE)
 set(JERRY_MEM_STATS ON CACHE BOOL "Enable memory statistics support" FORCE)
 
-fetch_package("github:jerryscript-project/jerryscript@3.0.0")
+fetch_package(
+  "github:jerryscript-project/jerryscript@3.0.0"
+  PATCHES
+    patches/01-remove-deprecated-enum-conversions.patch
+    patches/02-remove-archive-variables.patch
+)
 
 set_target_properties(
   js
