@@ -2604,6 +2604,37 @@ js_create_syntax_error(js_env_t *env, js_value_t *code, js_value_t *message, js_
 }
 
 int
+js_create_reference_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t **result) {
+  // Allow continuing even with a pending exception
+
+  jerry_value_t error = jerry_error(JERRY_ERROR_REFERENCE, js__value_from_abi(message));
+
+  if (code) {
+    jerry_value_t exception = jerry_object_set_sz(error, "code", js__value_from_abi(code));
+
+    if (jerry_value_is_exception(exception)) {
+      jerry_value_free(error);
+
+      if (env->depth) {
+        env->exception = exception;
+      } else {
+        js__uncaught_exception(env, exception);
+      }
+
+      return js__error(env);
+    }
+
+    jerry_value_free(exception);
+  }
+
+  *result = js__value_to_abi(error);
+
+  js__attach_to_handle_scope(env, env->scope, *result);
+
+  return 0;
+}
+
+int
 js_create_promise(js_env_t *env, js_deferred_t **deferred, js_value_t **promise) {
   // Allow continuing even with a pending exception
 
@@ -4996,6 +5027,64 @@ js_throw_syntax_errorf(js_env_t *env, const char *code, const char *message, ...
   va_start(args, message);
 
   int err = js_throw_syntax_verrorf(env, code, message, args);
+
+  va_end(args);
+
+  return err;
+}
+
+int
+js_throw_reference_error(js_env_t *env, const char *code, const char *message) {
+  if (env->exception) return js__error(env);
+
+  jerry_value_t error = jerry_error_sz(JERRY_ERROR_REFERENCE, message);
+
+  if (code) {
+    jerry_value_t value = jerry_string_sz(code);
+
+    jerry_value_t exception = jerry_object_set_sz(error, "code", value);
+
+    jerry_value_free(value);
+
+    if (jerry_value_is_exception(exception)) {
+      jerry_value_free(error);
+
+      if (env->depth) {
+        env->exception = exception;
+      } else {
+        js__uncaught_exception(env, exception);
+      }
+
+      return js__error(env);
+    }
+
+    jerry_value_free(exception);
+  }
+
+  env->exception = jerry_throw_value(error, true);
+
+  return 0;
+}
+
+int
+js_throw_reference_verrorf(js_env_t *env, const char *code, const char *message, va_list args) {
+  size_t len;
+  char *formatted;
+  js_vformat(&formatted, &len, message, args);
+
+  int err = js_throw_reference_error(env, code, formatted);
+
+  free(formatted);
+
+  return err;
+}
+
+int
+js_throw_reference_errorf(js_env_t *env, const char *code, const char *message, ...) {
+  va_list args;
+  va_start(args, message);
+
+  int err = js_throw_reference_verrorf(env, code, message, args);
 
   va_end(args);
 
