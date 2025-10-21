@@ -1,8 +1,6 @@
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 4.0)
 
 find_package(cmake-fetch REQUIRED PATHS node_modules/cmake-fetch)
-
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 project(js C)
 
