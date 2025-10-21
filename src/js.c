@@ -114,6 +114,7 @@ struct js_env_s {
     void *unhandled_rejection_data;
 
     js_dynamic_import_cb dynamic_import;
+    js_dynamic_import_transitional_cb dynamic_import_transitional;
     void *dynamic_import_data;
   } callbacks;
 };
@@ -745,6 +746,7 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   env->callbacks.unhandled_rejection_data = NULL;
 
   env->callbacks.dynamic_import = NULL;
+  env->callbacks.dynamic_import_transitional = NULL;
   env->callbacks.dynamic_import_data = NULL;
 
   err = uv_prepare_init(loop, &env->prepare);
@@ -826,6 +828,14 @@ js_on_unhandled_rejection(js_env_t *env, js_unhandled_rejection_cb cb, void *dat
 int
 js_on_dynamic_import(js_env_t *env, js_dynamic_import_cb cb, void *data) {
   env->callbacks.dynamic_import = cb;
+  env->callbacks.dynamic_import_data = data;
+
+  return 0;
+}
+
+int
+js_on_dynamic_import_transitional(js_env_t *env, js_dynamic_import_transitional_cb cb, void *data) {
+  env->callbacks.dynamic_import_transitional = cb;
   env->callbacks.dynamic_import_data = data;
 
   return 0;
@@ -1074,7 +1084,7 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t referrer
 
   js_env_t *env = opaque;
 
-  if (env->callbacks.dynamic_import == NULL) {
+  if (env->callbacks.dynamic_import == NULL && env->callbacks.dynamic_import_transitional == NULL) {
     return jerry_throw_sz(JERRY_ERROR_COMMON, "Dynamic import() is not supported");
   }
 
@@ -1084,28 +1094,46 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t referrer
   err = js_open_handle_scope(env, &scope);
   assert(err == 0);
 
-  js_module_t *module = env->callbacks.dynamic_import(
-    env,
-    js__value_to_abi(specifier),
-    js__value_to_abi(assertions),
-    js__value_to_abi(referrer),
-    env->callbacks.dynamic_import_data
-  );
+  jerry_value_t value;
+
+  if (env->callbacks.dynamic_import) {
+    js_module_t *module = env->callbacks.dynamic_import(
+      env,
+      js__value_to_abi(specifier),
+      js__value_to_abi(assertions),
+      js__value_to_abi(referrer),
+      env->callbacks.dynamic_import_data
+    );
+
+    if (env->exception) {
+      value = env->exception;
+
+      env->exception = 0;
+    } else {
+      value = jerry_value_copy(module->handle);
+    }
+  } else {
+    js_value_t *module = env->callbacks.dynamic_import_transitional(
+      env,
+      js__value_to_abi(specifier),
+      js__value_to_abi(assertions),
+      js__value_to_abi(referrer),
+      env->callbacks.dynamic_import_data
+    );
+
+    if (env->exception) {
+      value = env->exception;
+
+      env->exception = 0;
+    } else {
+      value = jerry_value_copy(js__value_from_abi(module));
+    }
+  }
 
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
 
   jerry_value_free(assertions);
-
-  jerry_value_t value;
-
-  if (env->exception) {
-    value = env->exception;
-
-    env->exception = 0;
-  } else {
-    value = jerry_value_copy(module->handle);
-  }
 
   return value;
 }
@@ -2630,6 +2658,17 @@ js_create_reference_error(js_env_t *env, js_value_t *code, js_value_t *message, 
   *result = js__value_to_abi(error);
 
   js__attach_to_handle_scope(env, env->scope, *result);
+
+  return 0;
+}
+
+int
+js_get_error_location(js_env_t *env, js_value_t *error, js_error_location_t *result) {
+  result->name = js__value_to_abi(jerry_undefined());
+  result->source = js__value_to_abi(jerry_undefined());
+  result->line = 0;
+  result->column_start = -1;
+  result->column_end = -1;
 
   return 0;
 }
@@ -5190,6 +5229,13 @@ js_get_heap_statistics(js_env_t *env, js_heap_statistics_t *result) {
 }
 
 int
+js_get_heap_space_statistics(js_env_t *env, js_heap_space_statistics_t statistics[], size_t len, size_t offset, size_t *result) {
+  if (result) *result = 0;
+
+  return 0;
+}
+
+int
 js_create_inspector(js_env_t *env, js_inspector_t **result) {
   int err;
 
@@ -5215,6 +5261,11 @@ js_on_inspector_response(js_env_t *env, js_inspector_t *inspector, js_inspector_
 }
 
 int
+js_on_inspector_response_transitional(js_env_t *env, js_inspector_t *inspector, js_inspector_message_transitional_cb cb, void *data) {
+  return 0;
+}
+
+int
 js_on_inspector_paused(js_env_t *env, js_inspector_t *inspector, js_inspector_paused_cb cb, void *data) {
   return 0;
 }
@@ -5231,6 +5282,36 @@ js_connect_inspector(js_env_t *env, js_inspector_t *inspector) {
 
 int
 js_send_inspector_request(js_env_t *env, js_inspector_t *inspector, js_value_t *message) {
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
+}
+
+int
+js_send_inspector_request_transitional(js_env_t *env, js_inspector_t *inspector, const char *message, size_t len) {
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
+}
+
+int
+js_attach_context_to_inspector(js_env_t *env, js_inspector_t *inspector, js_context_t *context, const char *name, size_t len) {
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
+}
+
+int
+js_detach_context_from_inspector(js_env_t *env, js_inspector_t *inspector, js_context_t *context) {
   int err;
 
   err = js_throw_error(env, NULL, "Unsupported operation");
