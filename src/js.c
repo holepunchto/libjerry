@@ -2970,6 +2970,8 @@ int
 js_create_typedarray(js_env_t *env, js_typedarray_type_t type, size_t len, js_value_t *arraybuffer, size_t offset, js_value_t **result) {
   if (env->exception) return js__error(env);
 
+  int err;
+
   jerry_typedarray_type_t type_name;
 
   switch (type) {
@@ -2994,6 +2996,16 @@ js_create_typedarray(js_env_t *env, js_typedarray_type_t type, size_t len, js_va
     break;
   case js_uint32array:
     type_name = JERRY_TYPEDARRAY_UINT32;
+    break;
+  case js_float16array:
+#ifdef JERRY_TYPEDARRAY_FLOAT16
+    type_name = JERRY_TYPEDARRAY_FLOAT16;
+#else
+    err = js_throw_error(env, NULL, "Unsupported operation");
+    assert(err == 0);
+
+    return -1;
+#endif
     break;
   case js_float32array:
     type_name = JERRY_TYPEDARRAY_FLOAT32;
@@ -3566,6 +3578,19 @@ js_is_uint32array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_UINT32;
+
+  return 0;
+}
+
+int
+js_is_float16array(js_env_t *env, js_value_t *value, bool *result) {
+  // Allow continuing even with a pending exception
+
+#ifdef JERRY_TYPEDARRAY_FLOAT16
+  *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_FLOAT16;
+#else
+  *result = false;
+#endif
 
   return 0;
 }
@@ -4501,6 +4526,11 @@ js_get_typedarray_info(js_env_t *env, js_value_t *typedarray, js_typedarray_type
     case JERRY_TYPEDARRAY_INT32:
       *type = js_int32array;
       break;
+#ifdef JERRY_TYPEDARRAY_FLOAT16
+    case JERRY_TYPEDARRAY_FLOAT16:
+      *type = js_float16array;
+      break;
+#endif
     case JERRY_TYPEDARRAY_FLOAT32:
       *type = js_float32array;
       break;
