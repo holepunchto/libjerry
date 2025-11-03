@@ -2273,6 +2273,16 @@ js_create_symbol(js_env_t *env, js_value_t *description, js_value_t **result) {
 }
 
 int
+js_symbol_for(js_env_t *env, const char *description, size_t len, js_value_t **result) {
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
+}
+
+int
 js_create_object(js_env_t *env, js_value_t **result) {
   // Allow continuing even with a pending exception
 
