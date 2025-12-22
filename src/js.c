@@ -3862,9 +3862,9 @@ js_get_array_elements(js_env_t *env, js_value_t *array, js_value_t **elements, s
   for (uint32_t i = 0, n = len, j = offset, m = jerry_array_length(js__value_from_abi(array)); i < n && j < m; i++, j++) {
     jerry_value_t value = jerry_object_get_index(js__value_from_abi(array), j);
 
-    if (jerry_value_is_exception(value)) {
-      if (env->depth == 1) js__run_microtasks(env);
+    if (env->depth == 1) js__run_microtasks(env);
 
+    if (jerry_value_is_exception(value)) {
       env->depth--;
 
       if (env->depth) {
@@ -3883,8 +3883,6 @@ js_get_array_elements(js_env_t *env, js_value_t *array, js_value_t **elements, s
     written++;
   }
 
-  if (env->depth == 1) js__run_microtasks(env);
-
   env->depth--;
 
   if (result) *result = written;
@@ -3901,9 +3899,9 @@ js_set_array_elements(js_env_t *env, js_value_t *array, const js_value_t *elemen
   for (uint32_t i = 0, n = len, j = offset; i < n; i++, j++) {
     jerry_value_t exception = jerry_object_set_index(js__value_from_abi(array), j, js__value_from_abi(elements[i]));
 
-    if (jerry_value_is_exception(exception)) {
-      if (env->depth == 1) js__run_microtasks(env);
+    if (env->depth == 1) js__run_microtasks(env);
 
+    if (jerry_value_is_exception(exception)) {
       env->depth--;
 
       if (env->depth) {
@@ -3917,8 +3915,6 @@ js_set_array_elements(js_env_t *env, js_value_t *array, const js_value_t *elemen
 
     jerry_value_free(exception);
   }
-
-  if (env->depth == 1) js__run_microtasks(env);
 
   env->depth--;
 
