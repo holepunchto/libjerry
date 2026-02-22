@@ -433,6 +433,12 @@ js__uncaught_exception(js_env_t *env, jerry_value_t exception) {
 
   int err;
 
+  if (jerry_value_is_abort(exception)) {
+    jerry_value_free(exception);
+
+    return;
+  }
+
   jerry_value_t value = jerry_exception_value(exception, true);
 
   if (env->callbacks.uncaught_exception) {
