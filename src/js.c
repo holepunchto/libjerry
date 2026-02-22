@@ -2144,6 +2144,17 @@ js_create_bigint_uint64(js_env_t *env, uint64_t value, js_value_t **result) {
 }
 
 int
+js_create_bigint_words(js_env_t *env, int sign, const uint64_t *words, size_t len, js_value_t **result) {
+  // Allow continuing even with a pending exception
+
+  *result = js__value_to_abi(jerry_bigint(words, (uint32_t) len, sign));
+
+  js__attach_to_handle_scope(env, env->scope, *result);
+
+  return 0;
+}
+
+int
 js_create_string_utf8(js_env_t *env, const utf8_t *str, size_t len, js_value_t **result) {
   int err;
 
@@ -3785,8 +3796,26 @@ int
 js_get_value_bigint_int64(js_env_t *env, js_value_t *value, int64_t *result, bool *lossless) {
   // Allow continuing even with a pending exception
 
-  // TODO
-  abort();
+  uint32_t digit_count = jerry_bigint_digit_count(js__value_from_abi(value));
+
+  uint64_t digit = 0;
+  bool negative = false;
+
+  if (digit_count > 0) jerry_bigint_to_digits(js__value_from_abi(value), &digit, 1, &negative);
+
+  *result = (int64_t) digit;
+
+  if (negative) *result = -(*result);
+
+  if (lossless) {
+    if (digit_count > 1) {
+      *lossless = false;
+    } else if (negative) {
+      *lossless = (digit <= (uint64_t) INT64_MAX + 1);
+    } else {
+      *lossless = (digit <= (uint64_t) INT64_MAX);
+    }
+  }
 
   return 0;
 }
@@ -3795,12 +3824,42 @@ int
 js_get_value_bigint_uint64(js_env_t *env, js_value_t *value, uint64_t *result, bool *lossless) {
   // Allow continuing even with a pending exception
 
-  // TODO
-  abort();
+  uint32_t digit_count = jerry_bigint_digit_count(js__value_from_abi(value));
+
+  uint64_t digit = 0;
+  bool negative = false;
+
+  if (digit_count > 0) jerry_bigint_to_digits(js__value_from_abi(value), &digit, 1, &negative);
+
+  *result = digit;
+
+  if (lossless) *lossless = !negative && digit_count <= 1;
 
   return 0;
 }
 
+int
+js_get_value_bigint_words(js_env_t *env, js_value_t *value, int *sign, uint64_t *words, size_t len, size_t *result) {
+  // Allow continuing even with a pending exception
+
+  uint32_t digit_count = jerry_bigint_digit_count(js__value_from_abi(value));
+
+  if (words == NULL) {
+    *result = (size_t) digit_count;
+
+    return 0;
+  }
+
+  bool negative = false;
+
+  jerry_bigint_to_digits(js__value_from_abi(value), words, (uint32_t) len, &negative);
+
+  if (sign) *sign = negative ? 1 : 0;
+
+  *result = (size_t) digit_count;
+
+  return 0;
+}
 int
 js_get_value_string_utf8(js_env_t *env, js_value_t *value, utf8_t *str, size_t len, size_t *result) {
   // Allow continuing even with a pending exception
