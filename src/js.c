@@ -90,11 +90,11 @@ struct js_env_s {
 
   js_platform_t *platform;
   js_handle_scope_t *scope;
-  js_context_t *context;
 
   uint32_t refs;
   uint32_t depth;
 
+  jerry_value_t realm;
   jerry_value_t bindings;
   jerry_value_t exception;
 
@@ -121,8 +121,7 @@ struct js_env_s {
 
 struct js_context_s {
   jerry_value_t realm;
-
-  js_context_t *previous;
+  jerry_value_t previous;
 };
 
 struct js_value_s;
@@ -655,14 +654,13 @@ js__on_handle_close(uv_handle_t *handle) {
   js_env_t *env = (js_env_t *) handle->data;
 
   if (--env->active_handles == 0) {
-    free(env->context);
     free(env);
   }
 }
 
 static void
 js__close_env(js_env_t *env) {
-  jerry_value_free(env->context->realm);
+  jerry_value_free(env->realm);
   jerry_value_free(env->bindings);
   jerry_value_free(env->exception);
 
@@ -721,13 +719,10 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   env->platform = platform;
   env->scope = NULL;
 
-  env->context = malloc(sizeof(js_context_t));
-  env->context->realm = jerry_current_realm();
-  env->context->previous = NULL;
-
   env->refs = 0;
   env->depth = 0;
 
+  env->realm = jerry_current_realm();
   env->bindings = jerry_object();
   env->exception = 0;
 
@@ -934,7 +929,7 @@ js_create_context(js_env_t *env, js_context_t **result) {
   js_context_t *context = malloc(sizeof(js_context_t));
 
   context->realm = jerry_realm();
-  context->previous = NULL;
+  context->previous = 0;
 
   *result = context;
 
@@ -956,9 +951,9 @@ int
 js_enter_context(js_env_t *env, js_context_t *context) {
   // Allow continuing even with a pending exception
 
-  context->previous = env->context;
+  context->previous = env->realm;
 
-  env->context = context;
+  env->realm = context->realm;
 
   jerry_set_realm(context->realm);
 
@@ -969,11 +964,11 @@ int
 js_exit_context(js_env_t *env, js_context_t *context) {
   // Allow continuing even with a pending exception
 
-  env->context = context->previous;
+  env->realm = context->previous;
 
-  context->previous = NULL;
+  context->previous = 0;
 
-  jerry_set_realm(env->context->realm);
+  jerry_set_realm(env->realm);
 
   return 0;
 }
