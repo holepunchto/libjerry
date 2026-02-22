@@ -200,21 +200,13 @@ list(APPEND skipped_tests
   inspector-pause
 
   # Not supported
+  run-module-async
+
+  # Not supported
   wasm
   wasm-async
   wasm-async-io
   wasm-async-io-multiple
-
-  # Not supported
-  run-module-async
-
-  # Not implemented
-  call-threadsafe-function-after-release
-  call-threadsafe-function-with-data
-  create-threadsafe-function
-  create-threadsafe-function-with-callback
-  create-threadsafe-function-with-context
-  create-threadsafe-function-with-finalizer
 )
 
 foreach(test IN LISTS tests)
