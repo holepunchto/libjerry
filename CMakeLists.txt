@@ -4,12 +4,6 @@ find_package(cmake-fetch REQUIRED PATHS node_modules/cmake-fetch)
 
 project(js C)
 
-add_library(js OBJECT)
-
-fetch_package("github:holepunchto/libjs" SOURCE_DIR js)
-fetch_package("github:holepunchto/libpath")
-fetch_package("github:holepunchto/libintrusive")
-
 set(JERRY_EXTERNAL_CONTEXT ON CACHE BOOL "Enable external context support" FORCE)
 set(JERRY_FUNCTION_TO_STRING ON CACHE BOOL "Enable function.toString() support" FORCE)
 set(JERRY_PROMISE_CALLBACK ON CACHE BOOL "Enable promise event callback support" FORCE)
@@ -23,6 +17,12 @@ fetch_package(
     patches/01-remove-deprecated-enum-conversions.patch
     patches/02-remove-archive-variables.patch
 )
+
+add_library(js OBJECT)
+
+fetch_package("github:holepunchto/libjs" SOURCE_DIR js)
+fetch_package("github:holepunchto/libpath")
+fetch_package("github:holepunchto/libintrusive")
 
 set_target_properties(
   js
