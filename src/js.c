@@ -558,49 +558,49 @@ js__on_arraybuffer_allocate(jerry_arraybuffer_type_t type, uint32_t len, void **
 
 static void
 js__on_arraybuffer_free(jerry_arraybuffer_type_t type, uint8_t *buffer, uint32_t len, void *data, void *opaque) {
-  if (type == JERRY_ARRAYBUFFER_TYPE_SHARED_ARRAYBUFFER) {
-    js_arraybuffer_header_t *header = js__arraybuffer_header(buffer);
+  js_arraybuffer_attachment_t *attachment = data;
 
-    if (--header->references == 0) {
-      free(header);
-    }
-  } else {
-    js_env_t *env = opaque;
+  if (attachment == NULL) {
+    if (type == JERRY_ARRAYBUFFER_TYPE_SHARED_ARRAYBUFFER) {
+      js_arraybuffer_header_t *header = js__arraybuffer_header(buffer);
 
-    js_arraybuffer_attachment_t *attachment = data;
-
-    if (attachment == NULL) {
-      free(buffer);
-
-      return;
-    }
-
-    switch (attachment->type) {
-    case js_arraybuffer_finalizer: {
-      js_finalizer_t *finalizer = &attachment->finalizer;
-
-      if (finalizer->cb) finalizer->cb(finalizer->env, finalizer->data, finalizer->hint);
-
-      break;
-    }
-
-    case js_arraybuffer_backing_store: {
-      js_arraybuffer_backing_store_t *backing_store = attachment->backing_store;
-
-      if (--backing_store->references == 0) {
-        jerry_value_free(backing_store->owner);
-
-        if (env->destroying) jerry_heap_gc(JERRY_GC_PRESSURE_LOW);
-
-        free(backing_store);
+      if (--header->references == 0) {
+        free(header);
       }
-
-      break;
+    } else {
+      free(buffer);
     }
-    }
 
-    free(attachment);
+    return;
   }
+
+  js_env_t *env = opaque;
+
+  switch (attachment->type) {
+  case js_arraybuffer_finalizer: {
+    js_finalizer_t *finalizer = &attachment->finalizer;
+
+    if (finalizer->cb) finalizer->cb(finalizer->env, finalizer->data, finalizer->hint);
+
+    break;
+  }
+
+  case js_arraybuffer_backing_store: {
+    js_arraybuffer_backing_store_t *backing_store = attachment->backing_store;
+
+    if (--backing_store->references == 0) {
+      jerry_value_free(backing_store->owner);
+
+      if (env->destroying) jerry_heap_gc(JERRY_GC_PRESSURE_LOW);
+
+      free(backing_store);
+    }
+
+    break;
+  }
+  }
+
+  free(attachment);
 }
 
 static void
@@ -3342,7 +3342,7 @@ int
 js_is_generator(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
-  *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_ITERATOR;
+  *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_GENERATOR;
 
   return 0;
 }
@@ -3864,8 +3864,35 @@ int
 js_get_value_string_utf16le(js_env_t *env, js_value_t *value, utf16_t *str, size_t len, size_t *result) {
   // Allow continuing even with a pending exception
 
-  // TODO
-  abort();
+  jerry_value_t string = js__value_from_abi(value);
+
+  jerry_size_t utf8_len = jerry_string_size(string, JERRY_ENCODING_UTF8);
+
+  utf8_t *utf8 = malloc(utf8_len);
+
+  jerry_string_to_buffer(string, JERRY_ENCODING_UTF8, utf8, utf8_len);
+
+  size_t utf16_len = utf16_length_from_utf8(utf8, utf8_len);
+
+  if (str == NULL) {
+    *result = utf16_len;
+  } else if (len != 0) {
+    utf16_t *utf16 = malloc(utf16_len * sizeof(utf16_t));
+
+    utf8_convert_to_utf16le(utf8, utf8_len, utf16);
+
+    size_t written = utf16_len < len ? utf16_len : len;
+
+    memcpy(str, utf16, written * sizeof(utf16_t));
+
+    if (written < len) str[written] = '\0';
+
+    if (result) *result = written;
+
+    free(utf16);
+  } else if (result) *result = 0;
+
+  free(utf8);
 
   return 0;
 }
@@ -3874,8 +3901,35 @@ int
 js_get_value_string_latin1(js_env_t *env, js_value_t *value, latin1_t *str, size_t len, size_t *result) {
   // Allow continuing even with a pending exception
 
-  // TODO
-  abort();
+  jerry_value_t string = js__value_from_abi(value);
+
+  jerry_size_t utf8_len = jerry_string_size(string, JERRY_ENCODING_UTF8);
+
+  utf8_t *utf8 = malloc(utf8_len);
+
+  jerry_string_to_buffer(string, JERRY_ENCODING_UTF8, utf8, utf8_len);
+
+  size_t latin1_len = latin1_length_from_utf8(utf8, utf8_len);
+
+  if (str == NULL) {
+    *result = latin1_len;
+  } else if (len != 0) {
+    latin1_t *latin1 = malloc(latin1_len);
+
+    utf8_convert_to_latin1(utf8, utf8_len, latin1);
+
+    size_t written = latin1_len < len ? latin1_len : len;
+
+    memcpy(str, latin1, written);
+
+    if (written < len) str[written] = '\0';
+
+    if (result) *result = written;
+
+    free(latin1);
+  } else if (result) *result = 0;
+
+  free(utf8);
 
   return 0;
 }
@@ -4391,8 +4445,35 @@ int
 js_has_element(js_env_t *env, js_value_t *object, uint32_t index, bool *result) {
   if (env->exception) return js__error(env);
 
-  // TODO
-  abort();
+  env->depth++;
+
+  jerry_value_t number = jerry_number(index);
+
+  jerry_value_t key = jerry_value_to_string(number);
+
+  jerry_value_free(number);
+
+  jerry_value_t value = jerry_object_has(js__value_from_abi(object), key);
+
+  jerry_value_free(key);
+
+  if (env->depth == 1) js__run_microtasks(env);
+
+  env->depth--;
+
+  if (jerry_value_is_exception(value)) {
+    if (env->depth) {
+      env->exception = value;
+    } else {
+      js__uncaught_exception(env, value);
+    }
+
+    return js__error(env);
+  }
+
+  if (result) *result = jerry_value_is_true(value);
+
+  jerry_value_free(value);
 
   return 0;
 }
@@ -4534,8 +4615,6 @@ js_get_new_target(js_env_t *env, const js_callback_info_t *info, js_value_t **re
   // Allow continuing even with a pending exception
 
   *result = js__value_to_abi(info->info->new_target);
-
-  js__attach_to_handle_scope(env, env->scope, *result);
 
   return 0;
 }
@@ -5632,6 +5711,26 @@ js_request_garbage_collection(js_env_t *env) {
   jerry_heap_gc(JERRY_GC_PRESSURE_LOW);
 
   return 0;
+}
+
+int
+js_enable_garbage_collection_tracking(js_env_t *env, const js_garbage_collection_tracking_options_t *options, void *data, js_garbage_collection_tracking_t **result) {
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
+}
+
+int
+js_disable_garbage_collection_tracking(js_env_t *env, js_garbage_collection_tracking_t *tracking) {
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
 }
 
 int
