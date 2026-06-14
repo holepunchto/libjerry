@@ -290,6 +290,9 @@ list(APPEND skipped_tests
   inspector-pause
 
   # Not supported
+  is-float16array
+
+  # Not supported
   run-module-async
 
   # Not supported
