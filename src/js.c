@@ -2510,9 +2510,11 @@ js_create_function_with_source(js_env_t *env, const char *name, size_t name_len,
 
   jerry_value_t argument_list = jerry_string_sz(buf);
 
-  // Compiled functions do not carry an identifier of their own and are
-  // attributed to the environment's shared default identifier.
-  jerry_value_t user_value = js__module_user_value(source_name, js__default_module_id(env));
+  // Mint a unique identifier for the function and carry it as the user value so
+  // it can be recovered as the referrer of any dynamic import().
+  jerry_value_t id = jerry_symbol_with_description(source_name);
+
+  jerry_value_t user_value = js__module_user_value(source_name, id);
 
   jerry_parse_options_t options = {
     .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE | JERRY_PARSE_HAS_ARGUMENT_LIST,
@@ -2527,6 +2529,7 @@ js_create_function_with_source(js_env_t *env, const char *name, size_t name_len,
 
   jerry_value_t parsed = jerry_parse_value(js__value_from_abi(source), &options);
 
+  jerry_value_free(id);
   jerry_value_free(user_value);
   jerry_value_free(source_name);
   jerry_value_free(argument_list);
@@ -2551,6 +2554,34 @@ js_create_function_with_source(js_env_t *env, const char *name, size_t name_len,
 int
 js_create_typed_function(js_env_t *env, const char *name, size_t len, js_function_cb cb, const js_callback_signature_t *signature, const void *address, void *data, js_value_t **result) {
   return js_create_function(env, name, len, cb, data, result);
+}
+
+int
+js_get_function_id(js_env_t *env, js_value_t *function, js_value_t **result) {
+  // Allow continuing even with a pending exception
+
+  // Recover the identifier carried by the user value of the function. Functions
+  // compiled with `js_create_function_with_source()` carry a two-element array
+  // of `[name, id]`, but fall back to the environment's default identifier
+  // should the user value originate elsewhere.
+
+  jerry_value_t user_value = jerry_source_user_value(js__value_from_abi(function));
+
+  jerry_value_t id;
+
+  if (jerry_value_is_array(user_value) && jerry_array_length(user_value) == 2) {
+    id = jerry_object_get_index(user_value, 1);
+  } else {
+    id = jerry_value_copy(js__default_module_id(env));
+  }
+
+  jerry_value_free(user_value);
+
+  *result = js__value_to_abi(id);
+
+  js__attach_to_handle_scope(env, env->scope, *result);
+
+  return 0;
 }
 
 int
