@@ -99,6 +99,8 @@ struct js_env_s {
   jerry_value_t bindings;
   jerry_value_t exception;
 
+  jerry_value_t default_module_id;
+
   int64_t external_memory;
 
   bool destroying;
@@ -141,6 +143,7 @@ struct js_module_s {
   js_env_t *env;
   char *name;
   jerry_value_t handle;
+  jerry_value_t id;
   js_module_meta_cb meta;
   void *meta_data;
   js_module_resolve_cb resolve;
@@ -693,6 +696,7 @@ js__close_env(js_env_t *env) {
   jerry_value_free(env->realm);
   jerry_value_free(env->bindings);
   jerry_value_free(env->exception);
+  jerry_value_free(env->default_module_id);
 
   jerry_cleanup();
 
@@ -772,6 +776,8 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
 
   env->callbacks.dynamic_import = NULL;
   env->callbacks.dynamic_import_data = NULL;
+
+  env->default_module_id = 0;
 
   err = uv_prepare_init(loop, &env->prepare);
   assert(err == 0);
@@ -855,11 +861,6 @@ js_on_dynamic_import(js_env_t *env, js_dynamic_import_cb cb, void *data) {
   env->callbacks.dynamic_import_data = data;
 
   return 0;
-}
-
-int
-js_on_dynamic_import_transitional(js_env_t *env, js_dynamic_import_cb cb, void *data) {
-  return js_on_dynamic_import_transitional(env, cb, data);
 }
 
 int
@@ -1008,6 +1009,36 @@ js_get_bindings(js_env_t *env, js_value_t **result) {
   return 0;
 }
 
+// Returns the identifier shared by all compilation units that do not carry one
+// of their own, such as scripts run with `js_run_script()`. The identifier is
+// created lazily and remains stable for the lifetime of the environment.
+static jerry_value_t
+js__default_module_id(js_env_t *env) {
+  if (env->default_module_id == 0) {
+    jerry_value_t description = jerry_undefined();
+
+    env->default_module_id = jerry_symbol_with_description(description);
+
+    jerry_value_free(description);
+  }
+
+  return env->default_module_id;
+}
+
+// Builds the value associated with a compilation unit and handed back as the
+// referrer of any dynamic import() it initiates. JerryScript only carries a
+// single user value per unit, so we pack both the referrer name and its
+// identifier into a two-element array.
+static jerry_value_t
+js__module_user_value(jerry_value_t name, jerry_value_t id) {
+  jerry_value_t user_value = jerry_array(2);
+
+  jerry_value_free(jerry_object_set_index(user_value, 0, name));
+  jerry_value_free(jerry_object_set_index(user_value, 1, id));
+
+  return user_value;
+}
+
 int
 js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_t *source, js_value_t **result) {
   if (env->exception) return js__error(env);
@@ -1025,16 +1056,21 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
 
   jerry_value_t source_name = jerry_string((const jerry_char_t *) file, len, JERRY_ENCODING_UTF8);
 
+  // Scripts do not carry an identifier of their own and are attributed to the
+  // environment's shared default identifier.
+  jerry_value_t user_value = js__module_user_value(source_name, js__default_module_id(env));
+
   jerry_parse_options_t options = {
     .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE,
     .source_name = source_name,
     .start_line = 1,
     .start_column = offset,
-    .user_value = source_name,
+    .user_value = user_value,
   };
 
   jerry_value_t parsed = jerry_parse_value(js__value_from_abi(source), &options);
 
+  jerry_value_free(user_value);
   jerry_value_free(source_name);
 
   if (jerry_value_is_exception(parsed)) {
@@ -1100,7 +1136,7 @@ js__on_module_import_meta(const jerry_value_t handle, const jerry_value_t meta, 
 }
 
 static jerry_value_t
-js__on_module_import(const jerry_value_t specifier, const jerry_value_t referrer, void *opaque) {
+js__on_module_import(const jerry_value_t specifier, const jerry_value_t user_value, void *opaque) {
   int err;
 
   js_env_t *env = opaque;
@@ -1111,19 +1147,35 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t referrer
 
   jerry_value_t assertions = jerry_null();
 
+  // Recover the referrer name and identifier carried by the user value. Units
+  // compiled by this library always carry a two-element array, but fall back
+  // gracefully should the user value originate elsewhere.
+
+  jerry_value_t referrer;
+  jerry_value_t id;
+
+  if (jerry_value_is_array(user_value) && jerry_array_length(user_value) == 2) {
+    referrer = jerry_object_get_index(user_value, 0);
+    id = jerry_object_get_index(user_value, 1);
+  } else {
+    referrer = jerry_value_copy(user_value);
+    id = jerry_value_copy(js__default_module_id(env));
+  }
+
   js_handle_scope_t *scope;
   err = js_open_handle_scope(env, &scope);
   assert(err == 0);
-
-  jerry_value_t value;
 
   js_value_t *module = env->callbacks.dynamic_import(
     env,
     js__value_to_abi(specifier),
     js__value_to_abi(assertions),
     js__value_to_abi(referrer),
+    js__value_to_abi(id),
     env->callbacks.dynamic_import_data
   );
+
+  jerry_value_t value;
 
   if (env->exception) {
     value = env->exception;
@@ -1136,6 +1188,8 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t referrer
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
 
+  jerry_value_free(referrer);
+  jerry_value_free(id);
   jerry_value_free(assertions);
 
   return value;
@@ -1158,19 +1212,28 @@ js_create_module(js_env_t *env, const char *name, size_t len, int offset, js_val
 
   jerry_value_t source_name = jerry_string((const jerry_char_t *) name, len, JERRY_ENCODING_UTF8);
 
+  // Mint a unique identifier for the module and carry it as the user value so
+  // it can be recovered as the referrer of any dynamic import().
+  jerry_value_t id = jerry_symbol_with_description(source_name);
+
+  jerry_value_t user_value = js__module_user_value(source_name, id);
+
   jerry_parse_options_t options = {
     .options = JERRY_PARSE_MODULE | JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE,
     .source_name = source_name,
     .start_line = 1,
     .start_column = offset,
-    .user_value = source_name,
+    .user_value = user_value,
   };
 
   jerry_value_t handle = jerry_parse_value(js__value_from_abi(source), &options);
 
+  jerry_value_free(user_value);
   jerry_value_free(source_name);
 
   if (jerry_value_is_exception(handle)) {
+    jerry_value_free(id);
+
     if (env->depth) {
       env->exception = handle;
     } else {
@@ -1186,6 +1249,7 @@ js_create_module(js_env_t *env, const char *name, size_t len, int offset, js_val
 
   module->env = env;
   module->handle = handle;
+  module->id = id;
   module->meta = cb;
   module->meta_data = data;
 
@@ -1247,12 +1311,19 @@ js_create_synthetic_module(js_env_t *env, const char *name, size_t len, js_value
 
   free(names);
 
+  jerry_value_t source_name = jerry_string((const jerry_char_t *) name, len == (size_t) -1 ? strlen(name) : len, JERRY_ENCODING_UTF8);
+
+  jerry_value_t id = jerry_symbol_with_description(source_name);
+
+  jerry_value_free(source_name);
+
   js_module_t *module = malloc(sizeof(js_module_t));
 
   jerry_object_set_native_ptr(handle, &js__module, module);
 
   module->env = env;
   module->handle = handle;
+  module->id = id;
   module->evaluate = cb;
   module->evaluate_data = data;
 
@@ -1275,6 +1346,7 @@ js_delete_module(js_env_t *env, js_module_t *module) {
   // Allow continuing even with a pending exception
 
   jerry_value_free(module->handle);
+  jerry_value_free(module->id);
 
   free(module->name);
   free(module);
@@ -1287,6 +1359,28 @@ js_get_module_name(js_env_t *env, js_module_t *module, const char **result) {
   // Allow continuing even with a pending exception
 
   *result = module->name;
+
+  return 0;
+}
+
+int
+js_get_module_id(js_env_t *env, js_module_t *module, js_value_t **result) {
+  // Allow continuing even with a pending exception
+
+  *result = js__value_to_abi(jerry_value_copy(module->id));
+
+  js__attach_to_handle_scope(env, env->scope, *result);
+
+  return 0;
+}
+
+int
+js_get_default_module_id(js_env_t *env, js_value_t **result) {
+  // Allow continuing even with a pending exception
+
+  *result = js__value_to_abi(jerry_value_copy(js__default_module_id(env)));
+
+  js__attach_to_handle_scope(env, env->scope, *result);
 
   return 0;
 }
@@ -2416,12 +2510,16 @@ js_create_function_with_source(js_env_t *env, const char *name, size_t name_len,
 
   jerry_value_t argument_list = jerry_string_sz(buf);
 
+  // Compiled functions do not carry an identifier of their own and are
+  // attributed to the environment's shared default identifier.
+  jerry_value_t user_value = js__module_user_value(source_name, js__default_module_id(env));
+
   jerry_parse_options_t options = {
     .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE | JERRY_PARSE_HAS_ARGUMENT_LIST,
     .source_name = source_name,
     .start_line = 1,
     .start_column = offset,
-    .user_value = source_name,
+    .user_value = user_value,
     .argument_list = argument_list,
   };
 
@@ -2429,6 +2527,7 @@ js_create_function_with_source(js_env_t *env, const char *name, size_t name_len,
 
   jerry_value_t parsed = jerry_parse_value(js__value_from_abi(source), &options);
 
+  jerry_value_free(user_value);
   jerry_value_free(source_name);
   jerry_value_free(argument_list);
 
@@ -5790,11 +5889,6 @@ js_on_inspector_response(js_env_t *env, js_inspector_t *inspector, js_inspector_
 }
 
 int
-js_on_inspector_response_transitional(js_env_t *env, js_inspector_t *inspector, js_inspector_message_cb cb, void *data) {
-  return 0;
-}
-
-int
 js_on_inspector_paused(js_env_t *env, js_inspector_t *inspector, js_inspector_paused_cb cb, void *data) {
   return 0;
 }
@@ -5811,16 +5905,6 @@ js_connect_inspector(js_env_t *env, js_inspector_t *inspector) {
 
 int
 js_send_inspector_request(js_env_t *env, js_inspector_t *inspector, const char *message, size_t len) {
-  int err;
-
-  err = js_throw_error(env, NULL, "Unsupported operation");
-  assert(err == 0);
-
-  return js__error(env);
-}
-
-int
-js_send_inspector_request_transitional(js_env_t *env, js_inspector_t *inspector, const char *message, size_t len) {
   int err;
 
   err = js_throw_error(env, NULL, "Unsupported operation");
