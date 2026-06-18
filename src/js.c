@@ -155,6 +155,10 @@ struct js_module_s {
 struct js_script_s {
   js_env_t *env;
   char *name;
+  size_t name_len;
+  int offset;
+  jerry_value_t source;
+  jerry_value_t realm;
   jerry_value_t handle;
   jerry_value_t id;
 };
@@ -1120,6 +1124,33 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
   return 0;
 }
 
+// Parses a script against the currently entered realm, carrying the given
+// identifier as its user value so it can be recovered as the referrer of any
+// dynamic import(). JerryScript bakes the active realm into the parsed
+// bytecode, so the parse must be repeated whenever the script is run in a
+// realm other than the one it was prepared in.
+static jerry_value_t
+js__parse_script(js_env_t *env, jerry_value_t source, const char *file, size_t len, int offset, jerry_value_t id) {
+  jerry_value_t source_name = jerry_string((const jerry_char_t *) file, len, JERRY_ENCODING_UTF8);
+
+  jerry_value_t user_value = js__module_user_value(source_name, id);
+
+  jerry_parse_options_t options = {
+    .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE,
+    .source_name = source_name,
+    .start_line = 1,
+    .start_column = offset,
+    .user_value = user_value,
+  };
+
+  jerry_value_t parsed = jerry_parse_value(source, &options);
+
+  jerry_value_free(user_value);
+  jerry_value_free(source_name);
+
+  return parsed;
+}
+
 int
 js_prepare_script(js_env_t *env, const char *file, size_t len, int offset, js_value_t *source, js_script_t **result) {
   if (env->exception) return js__error(env);
@@ -1137,27 +1168,21 @@ js_prepare_script(js_env_t *env, const char *file, size_t len, int offset, js_va
 
   jerry_value_t source_name = jerry_string((const jerry_char_t *) file, len, JERRY_ENCODING_UTF8);
 
-  // Mint a unique identifier for the script and carry it as the user value so
-  // it can be recovered as the referrer of any dynamic import().
+  // Mint a unique identifier for the script so it can be recovered as the
+  // referrer of any dynamic import().
   jerry_value_t id = jerry_symbol_with_description(source_name);
 
-  jerry_value_t user_value = js__module_user_value(source_name, id);
-
-  jerry_parse_options_t options = {
-    .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE,
-    .source_name = source_name,
-    .start_line = 1,
-    .start_column = offset,
-    .user_value = user_value,
-  };
-
-  jerry_value_t parsed = jerry_parse_value(js__value_from_abi(source), &options);
-
-  jerry_value_free(user_value);
   jerry_value_free(source_name);
+
+  // Retain the source so the script can be parsed again should it later be run
+  // in a realm other than the one it is prepared in.
+  jerry_value_t script_source = jerry_value_copy(js__value_from_abi(source));
+
+  jerry_value_t parsed = js__parse_script(env, script_source, file, len, offset, id);
 
   if (jerry_value_is_exception(parsed)) {
     jerry_value_free(id);
+    jerry_value_free(script_source);
 
     if (env->depth) {
       env->exception = parsed;
@@ -1171,9 +1196,13 @@ js_prepare_script(js_env_t *env, const char *file, size_t len, int offset, js_va
   js_script_t *script = malloc(sizeof(js_script_t));
 
   script->env = env;
+  script->offset = offset;
+  script->source = script_source;
+  script->realm = jerry_current_realm();
   script->handle = parsed;
   script->id = id;
 
+  script->name_len = len;
   script->name = malloc(len + 1);
   script->name[len] = '\0';
 
@@ -1188,13 +1217,38 @@ int
 js_run_prepared_script(js_env_t *env, js_script_t *script, js_value_t **result) {
   if (env->exception) return js__error(env);
 
+  jerry_value_t realm = jerry_current_realm();
+
+  // The parsed bytecode is bound to the realm the script was prepared in. When
+  // run in that same realm the prepared handle can be reused as-is; otherwise
+  // it must be parsed again to bind it to the currently entered realm.
+  bool reparsed = realm != script->realm;
+
+  jerry_value_t handle = reparsed
+    ? js__parse_script(env, script->source, script->name, script->name_len, script->offset, script->id)
+    : script->handle;
+
+  jerry_value_free(realm);
+
+  if (reparsed && jerry_value_is_exception(handle)) {
+    if (env->depth) {
+      env->exception = handle;
+    } else {
+      js__uncaught_exception(env, handle);
+    }
+
+    return js__error(env);
+  }
+
   env->depth++;
 
-  jerry_value_t value = jerry_run(script->handle);
+  jerry_value_t value = jerry_run(handle);
 
   if (env->depth == 1) js__run_microtasks(env);
 
   env->depth--;
+
+  if (reparsed) jerry_value_free(handle);
 
   if (jerry_value_is_exception(value)) {
     if (env->depth) {
@@ -1221,6 +1275,8 @@ js_delete_script(js_env_t *env, js_script_t *script) {
   // Allow continuing even with a pending exception
 
   jerry_value_free(script->handle);
+  jerry_value_free(script->source);
+  jerry_value_free(script->realm);
   jerry_value_free(script->id);
 
   free(script->name);
