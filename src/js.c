@@ -152,6 +152,13 @@ struct js_module_s {
   void *evaluate_data;
 };
 
+struct js_script_s {
+  js_env_t *env;
+  char *name;
+  jerry_value_t handle;
+  jerry_value_t id;
+};
+
 struct js_ref_s {
   jerry_value_t value;
   uint32_t count;
@@ -1109,6 +1116,126 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
 
     js__attach_to_handle_scope(env, env->scope, *result);
   }
+
+  return 0;
+}
+
+int
+js_prepare_script(js_env_t *env, const char *file, size_t len, int offset, js_value_t *source, js_script_t **result) {
+  if (env->exception) return js__error(env);
+
+  int err;
+
+  if (len == (size_t) -1) len = strlen(file);
+
+  if (len > UINT32_MAX) {
+    err = js_throw_range_error(env, NULL, "String allocation failed");
+    assert(err == 0);
+
+    return js__error(env);
+  }
+
+  jerry_value_t source_name = jerry_string((const jerry_char_t *) file, len, JERRY_ENCODING_UTF8);
+
+  // Mint a unique identifier for the script and carry it as the user value so
+  // it can be recovered as the referrer of any dynamic import().
+  jerry_value_t id = jerry_symbol_with_description(source_name);
+
+  jerry_value_t user_value = js__module_user_value(source_name, id);
+
+  jerry_parse_options_t options = {
+    .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE,
+    .source_name = source_name,
+    .start_line = 1,
+    .start_column = offset,
+    .user_value = user_value,
+  };
+
+  jerry_value_t parsed = jerry_parse_value(js__value_from_abi(source), &options);
+
+  jerry_value_free(user_value);
+  jerry_value_free(source_name);
+
+  if (jerry_value_is_exception(parsed)) {
+    jerry_value_free(id);
+
+    if (env->depth) {
+      env->exception = parsed;
+    } else {
+      js__uncaught_exception(env, parsed);
+    }
+
+    return js__error(env);
+  }
+
+  js_script_t *script = malloc(sizeof(js_script_t));
+
+  script->env = env;
+  script->handle = parsed;
+  script->id = id;
+
+  script->name = malloc(len + 1);
+  script->name[len] = '\0';
+
+  memcpy(script->name, file, len);
+
+  *result = script;
+
+  return 0;
+}
+
+int
+js_run_prepared_script(js_env_t *env, js_script_t *script, js_value_t **result) {
+  if (env->exception) return js__error(env);
+
+  env->depth++;
+
+  jerry_value_t value = jerry_run(script->handle);
+
+  if (env->depth == 1) js__run_microtasks(env);
+
+  env->depth--;
+
+  if (jerry_value_is_exception(value)) {
+    if (env->depth) {
+      env->exception = value;
+    } else {
+      js__uncaught_exception(env, value);
+    }
+
+    return js__error(env);
+  }
+
+  if (result == NULL) jerry_value_free(value);
+  else {
+    *result = js__value_to_abi(value);
+
+    js__attach_to_handle_scope(env, env->scope, *result);
+  }
+
+  return 0;
+}
+
+int
+js_delete_script(js_env_t *env, js_script_t *script) {
+  // Allow continuing even with a pending exception
+
+  jerry_value_free(script->handle);
+  jerry_value_free(script->id);
+
+  free(script->name);
+  free(script);
+
+  return 0;
+}
+
+int
+js_get_script_id(js_env_t *env, js_script_t *script, js_value_t **result) {
+  // Allow continuing even with a pending exception
+
+  *result = js__value_to_abi(jerry_value_copy(script->id));
+
+  js__attach_to_handle_scope(env, env->scope, *result);
 
   return 0;
 }
