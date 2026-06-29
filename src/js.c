@@ -45,6 +45,7 @@ typedef struct js_delegate_s js_delegate_t;
 typedef struct js_arraybuffer_header_s js_arraybuffer_header_t;
 typedef struct js_arraybuffer_attachment_s js_arraybuffer_attachment_t;
 typedef struct js_promise_rejection_s js_promise_rejection_t;
+typedef struct js_microtask_s js_microtask_t;
 typedef struct js_threadsafe_queue_s js_threadsafe_queue_t;
 typedef struct js_teardown_task_s js_teardown_task_t;
 typedef struct js_teardown_queue_s js_teardown_queue_t;
@@ -250,6 +251,12 @@ struct js_promise_rejection_s {
   jerry_value_t promise;
   jerry_value_t reason;
   js_promise_rejection_t *next;
+};
+
+struct js_microtask_s {
+  js_env_t *env;
+  js_task_cb cb;
+  void *data;
 };
 
 static const uint8_t js_threadsafe_function_idle = 0x0;
@@ -5448,6 +5455,89 @@ js_get_dataview_info(js_env_t *env, js_value_t *dataview, void **data, size_t *l
   }
 
   if (offset) *offset = byte_offset;
+
+  return 0;
+}
+
+static void
+js__queue_microtask(js_env_t *env, jerry_value_t function) {
+  jerry_value_t promise = jerry_promise();
+
+  jerry_value_free(jerry_promise_resolve(promise, jerry_undefined()));
+
+  jerry_value_t then = jerry_object_get_sz(promise, "then");
+
+  jerry_value_free(jerry_call(then, promise, &function, 1));
+
+  jerry_value_free(then);
+  jerry_value_free(promise);
+}
+
+int
+js_queue_microtask(js_env_t *env, js_value_t *function) {
+  if (env->exception) return js__error(env);
+
+  js__enter(env);
+
+  js__queue_microtask(env, js__value_from_abi(function));
+
+  return 0;
+}
+
+static void
+js__on_microtask_finalize(void *data, jerry_object_native_info_t *info) {
+  free(data);
+}
+
+static const jerry_object_native_info_t js__microtask = {
+  .free_cb = js__on_microtask_finalize,
+};
+
+static jerry_value_t
+js__on_microtask_call(const jerry_call_info_t *info, const jerry_value_t argv[], const jerry_length_t argc) {
+  js_microtask_t *task = jerry_object_get_native_ptr(info->function, &js__microtask);
+
+  js_env_t *env = task->env;
+
+  js_env_scope_t previous = js__enter(env);
+
+  int err;
+
+  js_handle_scope_t *scope;
+  err = js_open_handle_scope(env, &scope);
+  assert(err == 0);
+
+  task->cb(env, task->data);
+
+  err = js_close_handle_scope(env, scope);
+  assert(err == 0);
+
+  js__exit(previous);
+
+  return jerry_undefined();
+}
+
+int
+js_queue_microtask_with_callback(js_env_t *env, js_task_cb cb, void *data) {
+  if (env->exception) return js__error(env);
+
+  js__enter(env);
+
+  js_microtask_t *task = malloc(sizeof(js_microtask_t));
+
+  task->env = env;
+  task->cb = cb;
+  task->data = data;
+
+  jerry_value_t function = jerry_function_external(js__on_microtask_call);
+
+  jerry_object_set_native_ptr(function, &js__microtask, task);
+
+  js__queue_microtask(env, function);
+
+  jerry_value_free(function);
+
+  if (env->depth == 0) js__run_microtasks(env);
 
   return 0;
 }
