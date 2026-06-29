@@ -1,0 +1,552 @@
+diff --git a/jerry-core/ecma/base/ecma-gc.c b/jerry-core/ecma/base/ecma-gc.c
+index 3346fc0..e063f92 100644
+--- a/jerry-core/ecma/base/ecma-gc.c
++++ b/jerry-core/ecma/base/ecma-gc.c
+@@ -606,9 +606,17 @@ ecma_gc_mark_weakmap_object (ecma_object_t *object_p) /**< object */
+       continue;
+     }
+ 
+-    JERRY_ASSERT (ecma_is_value_object (entry_p->key));
++    if (!ecma_is_value_object (entry_p->value))
++    {
++      continue;
++    }
+ 
+-    if (ecma_is_value_object (entry_p->value) && ecma_gc_is_object_visited (ecma_get_object_from_value (entry_p->key)))
++    /* An object-keyed entry keeps its value alive only while the key object is reachable.
++     * A symbol-keyed entry is removed by the symbol's destructor the moment the key becomes
++     * unreachable, so any symbol-keyed entry still present here necessarily has a live key and
++     * its value must be kept alive. Symbols are not garbage collected, so no reachability test
++     * on the key is possible or needed. */
++    if (!ecma_is_value_object (entry_p->key) || ecma_gc_is_object_visited (ecma_get_object_from_value (entry_p->key)))
+     {
+       ecma_gc_set_object_visited (ecma_get_object_from_value (entry_p->value));
+     }
+diff --git a/jerry-core/ecma/base/ecma-helpers-string.c b/jerry-core/ecma/base/ecma-helpers-string.c
+index 2f88aba..7106e63 100644
+--- a/jerry-core/ecma/base/ecma-helpers-string.c
++++ b/jerry-core/ecma/base/ecma-helpers-string.c
+@@ -21,6 +21,8 @@
+ #include "ecma-helpers-number.h"
+ #include "ecma-helpers.h"
+ 
++#include "ecma-container-object.h"
++
+ #include "jcontext.h"
+ #include "jrt-libc-includes.h"
+ #include "jrt.h"
+@@ -986,6 +988,16 @@ ecma_destroy_ecma_string (ecma_string_t *string_p) /**< ecma-string */
+     case ECMA_STRING_CONTAINER_SYMBOL:
+     {
+       ecma_extended_string_t *symbol_p = (ecma_extended_string_t *) string_p;
++#if JERRY_BUILTIN_CONTAINER
++      /* A symbol can be used as a weak key in a WeakMap/WeakSet. Since symbols are reference
++       * counted rather than garbage collected, this is the point at which the symbol becomes
++       * unreachable, so any entry keyed by it must be removed now. Registered (global) symbols
++       * are never weakly held and so are never registered in the side table. */
++      if ((string_p->u.hash & ECMA_SYMBOL_FLAG_GLOBAL) == 0)
++      {
++        ecma_op_container_symbol_clear_weak (string_p);
++      }
++#endif /* JERRY_BUILTIN_CONTAINER */
+       ecma_free_value (symbol_p->u.symbol_descriptor);
+       ecma_dealloc_extended_string (symbol_p);
+       return;
+diff --git a/jerry-core/ecma/base/ecma-init-finalize.c b/jerry-core/ecma/base/ecma-init-finalize.c
+index 60a3b2e..1103212 100644
+--- a/jerry-core/ecma/base/ecma-init-finalize.c
++++ b/jerry-core/ecma/base/ecma-init-finalize.c
+@@ -65,6 +65,10 @@ ecma_init (void)
+ #if JERRY_BUILTIN_TYPEDARRAY
+   JERRY_CONTEXT (arraybuffer_compact_allocation_limit) = 256;
+ #endif /* JERRY_BUILTIN_TYPEDARRAY */
++
++#if JERRY_BUILTIN_CONTAINER
++  JERRY_CONTEXT (symbol_weak_refs_p) = NULL;
++#endif /* JERRY_BUILTIN_CONTAINER */
+ } /* ecma_init */
+ 
+ /**
+@@ -98,6 +102,28 @@ ecma_finalize (void)
+   }
+ 
+   ecma_finalize_lit_storage ();
++
++#if JERRY_BUILTIN_CONTAINER
++  /* Every WeakMap/WeakSet has been released by the garbage collector above, so each entry in the
++   * symbol weak reference side table has been de-registered and its back-list destroyed. Only the
++   * empty rows of the table itself may remain to be reclaimed. */
++  ecma_collection_t *symbol_weak_refs_p = JERRY_CONTEXT (symbol_weak_refs_p);
++
++  if (symbol_weak_refs_p != NULL)
++  {
++    for (uint32_t i = 0; i < symbol_weak_refs_p->item_count; i += 2)
++    {
++      if (!ecma_is_value_empty (symbol_weak_refs_p->buffer_p[i]))
++      {
++        ecma_collection_destroy (
++          ECMA_GET_INTERNAL_VALUE_POINTER (ecma_collection_t, symbol_weak_refs_p->buffer_p[i + 1]));
++      }
++    }
++
++    ecma_collection_destroy (symbol_weak_refs_p);
++    JERRY_CONTEXT (symbol_weak_refs_p) = NULL;
++  }
++#endif /* JERRY_BUILTIN_CONTAINER */
+ } /* ecma_finalize */
+ 
+ /**
+diff --git a/jerry-core/ecma/operations/ecma-container-object.c b/jerry-core/ecma/operations/ecma-container-object.c
+index c9bc10c..7b1f1aa 100644
+--- a/jerry-core/ecma/operations/ecma-container-object.c
++++ b/jerry-core/ecma/operations/ecma-container-object.c
+@@ -37,6 +37,267 @@
+  * @{
+  */
+ 
++/**
++ * Check whether a value can be used as a key of a weak container (WeakMap/WeakSet).
++ *
++ * Both objects and unique symbols can be held weakly. Registered (global) symbols and
++ * well-known symbols live forever in a global registry, so holding them weakly would be
++ * pointless; matching the CanBeHeldWeakly abstract operation, they are not accepted.
++ *
++ * @return true if the value can be used as a weak key, false otherwise
++ */
++static inline bool
++ecma_op_container_key_can_be_held_weakly (ecma_value_t key_arg) /**< key argument */
++{
++  if (ecma_is_value_object (key_arg))
++  {
++    return true;
++  }
++
++  if (ecma_is_value_symbol (key_arg))
++  {
++    return (ecma_get_symbol_from_value (key_arg)->u.hash & ECMA_SYMBOL_FLAG_GLOBAL) == 0;
++  }
++
++  return false;
++} /* ecma_op_container_key_can_be_held_weakly */
++
++/**
++ * Check whether a container holds its keys weakly (i.e. it is a WeakMap or WeakSet).
++ *
++ * @return true if the container is weak, false otherwise
++ */
++static inline bool
++ecma_op_container_is_weak (lit_magic_string_id_t lit_id) /**< class id */
++{
++  return lit_id == LIT_MAGIC_STRING_WEAKMAP_UL || lit_id == LIT_MAGIC_STRING_WEAKSET_UL;
++} /* ecma_op_container_is_weak */
++
++/**
++ * Copy a key for storage in the internal buffer.
++ *
++ * Keys of a weak container are held weakly: object keys are tracked through their
++ * [[WeakRefs]] internal property and symbol keys through the symbol weak reference side
++ * table, so neither is reference counted by the buffer. Keys of a non-weak container are
++ * held strongly and are reference counted as usual.
++ *
++ * @return the value to store in the internal buffer
++ */
++static ecma_value_t
++ecma_op_internal_buffer_copy_key (ecma_value_t key_arg, /**< key argument */
++                                  lit_magic_string_id_t lit_id) /**< class id */
++{
++  if (ecma_op_container_is_weak (lit_id) && ecma_is_value_symbol (key_arg))
++  {
++    return key_arg;
++  }
++
++  return ecma_copy_value_if_not_object (key_arg);
++} /* ecma_op_internal_buffer_copy_key */
++
++/**
++ * Release a key stored in the internal buffer.
++ *
++ * The inverse of ecma_op_internal_buffer_copy_key: a weakly-held symbol key was stored
++ * without a reference, so it must not be released here.
++ */
++static void
++ecma_op_internal_buffer_free_key (ecma_value_t key_arg, /**< key argument */
++                                  lit_magic_string_id_t lit_id) /**< class id */
++{
++  if (ecma_op_container_is_weak (lit_id) && ecma_is_value_symbol (key_arg))
++  {
++    return;
++  }
++
++  ecma_free_value_if_not_object (key_arg);
++} /* ecma_op_internal_buffer_free_key */
++
++/**
++ * Find the weak reference back-list of a symbol in the side table.
++ *
++ * The side table maps a weakly-held symbol key to the list of WeakMap/WeakSet objects that
++ * reference it, mirroring the [[WeakRefs]] internal property attached to object keys.
++ *
++ * @return pointer to the back-list, or NULL if the symbol has no entry; if found and
++ *         row_index_p is not NULL, the row index of the symbol in the table is written to it
++ */
++static ecma_collection_t *
++ecma_op_container_symbol_find_weak_refs (ecma_string_t *symbol_p, /**< symbol key */
++                                         uint32_t *row_index_p) /**< [out] row index, optional */
++{
++  ecma_collection_t *table_p = JERRY_CONTEXT (symbol_weak_refs_p);
++
++  if (table_p == NULL)
++  {
++    return NULL;
++  }
++
++  const ecma_value_t symbol_value = ecma_make_symbol_value (symbol_p);
++
++  for (uint32_t i = 0; i < table_p->item_count; i += 2)
++  {
++    if (table_p->buffer_p[i] == symbol_value)
++    {
++      if (row_index_p != NULL)
++      {
++        *row_index_p = i;
++      }
++
++      return ECMA_GET_INTERNAL_VALUE_POINTER (ecma_collection_t, table_p->buffer_p[i + 1]);
++    }
++  }
++
++  return NULL;
++} /* ecma_op_container_symbol_find_weak_refs */
++
++/**
++ * Register a weak reference from a WeakMap/WeakSet to a symbol key.
++ *
++ * This is the symbol analog of ecma_op_object_set_weak: it records the container in the
++ * symbol's back-list so that the entry can be removed when the symbol is freed.
++ */
++void
++ecma_op_container_symbol_set_weak (ecma_string_t *symbol_p, /**< symbol key */
++                                   ecma_object_t *object_p) /**< container object */
++{
++  ecma_collection_t *table_p = JERRY_CONTEXT (symbol_weak_refs_p);
++
++  if (table_p == NULL)
++  {
++    table_p = ecma_new_collection ();
++    JERRY_CONTEXT (symbol_weak_refs_p) = table_p;
++  }
++
++  ecma_collection_t *refs_p = ecma_op_container_symbol_find_weak_refs (symbol_p, NULL);
++
++  if (refs_p == NULL)
++  {
++    refs_p = ecma_new_collection ();
++
++    const ecma_value_t symbol_value = ecma_make_symbol_value (symbol_p);
++    ecma_value_t refs_value;
++    ECMA_SET_INTERNAL_VALUE_POINTER (refs_value, refs_p);
++
++    /* Reuse an empty row left behind by a previously cleared symbol if one is available. */
++    bool row_reused = false;
++
++    for (uint32_t i = 0; i < table_p->item_count; i += 2)
++    {
++      if (ecma_is_value_empty (table_p->buffer_p[i]))
++      {
++        table_p->buffer_p[i] = symbol_value;
++        table_p->buffer_p[i + 1] = refs_value;
++        row_reused = true;
++        break;
++      }
++    }
++
++    if (!row_reused)
++    {
++      ecma_collection_push_back (table_p, symbol_value);
++      ecma_collection_push_back (table_p, refs_value);
++    }
++  }
++
++  const ecma_value_t ref_holder = ecma_make_object_value (object_p);
++
++  for (uint32_t i = 0; i < refs_p->item_count; i++)
++  {
++    if (ecma_is_value_empty (refs_p->buffer_p[i]))
++    {
++      refs_p->buffer_p[i] = ref_holder;
++      return;
++    }
++  }
++
++  ecma_collection_push_back (refs_p, ref_holder);
++} /* ecma_op_container_symbol_set_weak */
++
++/**
++ * Remove a weak reference from a WeakMap/WeakSet to a symbol key.
++ *
++ * This is the symbol analog of ecma_op_object_unref_weak. When the symbol's back-list
++ * becomes empty its row is released and the table slot is marked empty for reuse.
++ */
++void
++ecma_op_container_symbol_unref_weak (ecma_string_t *symbol_p, /**< symbol key */
++                                     ecma_value_t ref_holder) /**< container object value */
++{
++  uint32_t row_index;
++  ecma_collection_t *refs_p = ecma_op_container_symbol_find_weak_refs (symbol_p, &row_index);
++
++  if (refs_p == NULL)
++  {
++    return;
++  }
++
++  bool any_remaining = false;
++  bool removed = false;
++
++  for (uint32_t i = 0; i < refs_p->item_count; i++)
++  {
++    if (!removed && refs_p->buffer_p[i] == ref_holder)
++    {
++      refs_p->buffer_p[i] = ECMA_VALUE_EMPTY;
++      removed = true;
++      continue;
++    }
++
++    if (!ecma_is_value_empty (refs_p->buffer_p[i]))
++    {
++      any_remaining = true;
++    }
++  }
++
++  if (!any_remaining)
++  {
++    ecma_collection_t *table_p = JERRY_CONTEXT (symbol_weak_refs_p);
++
++    ecma_collection_destroy (refs_p);
++    table_p->buffer_p[row_index] = ECMA_VALUE_EMPTY;
++    table_p->buffer_p[row_index + 1] = ECMA_VALUE_EMPTY;
++  }
++} /* ecma_op_container_symbol_unref_weak */
++
++/**
++ * Remove every WeakMap/WeakSet entry keyed by a symbol that is about to be freed.
++ *
++ * Symbols are reference counted rather than garbage collected, so this hook runs from the
++ * symbol's destructor the moment its last strong reference is released. It walks the
++ * symbol's back-list, removes the corresponding entry from each container, and releases the
++ * back-list. Collection of symbol-keyed entries is therefore deterministic and immediate.
++ */
++void
++ecma_op_container_symbol_clear_weak (ecma_string_t *symbol_p) /**< symbol key */
++{
++  uint32_t row_index;
++  ecma_collection_t *refs_p = ecma_op_container_symbol_find_weak_refs (symbol_p, &row_index);
++
++  if (refs_p == NULL)
++  {
++    return;
++  }
++
++  const ecma_value_t symbol_value = ecma_make_symbol_value (symbol_p);
++
++  for (uint32_t i = 0; i < refs_p->item_count; i++)
++  {
++    if (ecma_is_value_empty (refs_p->buffer_p[i]))
++    {
++      continue;
++    }
++
++    ecma_op_container_remove_weak_entry (ecma_get_object_from_value (refs_p->buffer_p[i]), symbol_value);
++  }
++
++  ecma_collection_t *table_p = JERRY_CONTEXT (symbol_weak_refs_p);
++
++  ecma_collection_destroy (refs_p);
++  table_p->buffer_p[row_index] = ECMA_VALUE_EMPTY;
++  table_p->buffer_p[row_index + 1] = ECMA_VALUE_EMPTY;
++} /* ecma_op_container_symbol_clear_weak */
++
+ /**
+  * Create a new internal buffer.
+  *
+@@ -68,12 +329,13 @@ ecma_op_internal_buffer_append (ecma_collection_t *container_p, /**< internal co
+ 
+   if (lit_id == LIT_MAGIC_STRING_WEAKMAP_UL || lit_id == LIT_MAGIC_STRING_MAP_UL)
+   {
+-    ecma_value_t values[] = { ecma_copy_value_if_not_object (key_arg), ecma_copy_value_if_not_object (value_arg) };
++    ecma_value_t values[] = { ecma_op_internal_buffer_copy_key (key_arg, lit_id),
++                              ecma_copy_value_if_not_object (value_arg) };
+     ecma_collection_append (container_p, values, 2);
+   }
+   else
+   {
+-    ecma_collection_push_back (container_p, ecma_copy_value_if_not_object (key_arg));
++    ecma_collection_push_back (container_p, ecma_op_internal_buffer_copy_key (key_arg, lit_id));
+   }
+ 
+   ECMA_CONTAINER_SET_SIZE (container_p, ECMA_CONTAINER_GET_SIZE (container_p) + 1);
+@@ -108,7 +370,7 @@ ecma_op_internal_buffer_delete (ecma_collection_t *container_p, /**< internal co
+   JERRY_ASSERT (container_p != NULL);
+   JERRY_ASSERT (entry_p != NULL);
+ 
+-  ecma_free_value_if_not_object (entry_p->key);
++  ecma_op_internal_buffer_free_key (entry_p->key, lit_id);
+   entry_p->key = ECMA_VALUE_EMPTY;
+ 
+   if (lit_id == LIT_MAGIC_STRING_WEAKMAP_UL || lit_id == LIT_MAGIC_STRING_MAP_UL)
+@@ -208,8 +470,19 @@ ecma_op_container_free_weakset_entries (ecma_object_t *object_p, /**< object poi
+       continue;
+     }
+ 
+-    ecma_op_object_unref_weak (ecma_get_object_from_value (*entry_p), ecma_make_object_value (object_p));
+-    ecma_op_container_remove_weak_entry (object_p, *entry_p);
++    /* Both kinds of weak key keep a back-reference to this container that must be removed.
++     * Object keys are tracked through their [[WeakRefs]] internal property; symbol keys are
++     * tracked through the symbol weak reference side table. Neither key is reference counted
++     * by the buffer, so the key value itself must not be released. */
++    if (ecma_is_value_object (*entry_p))
++    {
++      ecma_op_object_unref_weak (ecma_get_object_from_value (*entry_p), ecma_make_object_value (object_p));
++      ecma_op_container_remove_weak_entry (object_p, *entry_p);
++    }
++    else
++    {
++      ecma_op_container_symbol_unref_weak (ecma_get_symbol_from_value (*entry_p), ecma_make_object_value (object_p));
++    }
+ 
+     *entry_p = ECMA_VALUE_EMPTY;
+   }
+@@ -237,8 +510,20 @@ ecma_op_container_free_weakmap_entries (ecma_object_t *object_p, /**< object poi
+       continue;
+     }
+ 
+-    ecma_op_object_unref_weak (ecma_get_object_from_value (entry_p->key), ecma_make_object_value (object_p));
+-    ecma_op_container_remove_weak_entry (object_p, entry_p->key);
++    /* Both kinds of weak key keep a back-reference to this container that must be removed.
++     * Object keys are tracked through their [[WeakRefs]] internal property; symbol keys are
++     * tracked through the symbol weak reference side table. Neither key is reference counted
++     * by the buffer, so the key value itself must not be released. */
++    if (ecma_is_value_object (entry_p->key))
++    {
++      ecma_op_object_unref_weak (ecma_get_object_from_value (entry_p->key), ecma_make_object_value (object_p));
++      ecma_op_container_remove_weak_entry (object_p, entry_p->key);
++    }
++    else
++    {
++      ecma_op_container_symbol_unref_weak (ecma_get_symbol_from_value (entry_p->key),
++                                           ecma_make_object_value (object_p));
++    }
+ 
+     ecma_free_value_if_not_object (entry_p->value);
+ 
+@@ -588,7 +873,7 @@ ecma_op_container_get (ecma_extended_object_t *map_object_p, /**< map object */
+                        ecma_value_t key_arg, /**< key argument */
+                        lit_magic_string_id_t lit_id) /**< internal class id */
+ {
+-  if (lit_id == LIT_MAGIC_STRING_WEAKMAP_UL && !ecma_is_value_object (key_arg))
++  if (lit_id == LIT_MAGIC_STRING_WEAKMAP_UL && !ecma_op_container_key_can_be_held_weakly (key_arg))
+   {
+     return ECMA_VALUE_UNDEFINED;
+   }
+@@ -623,7 +908,8 @@ ecma_op_container_has (ecma_extended_object_t *map_object_p, /**< map object */
+ {
+   ecma_collection_t *container_p = ECMA_GET_INTERNAL_VALUE_POINTER (ecma_collection_t, map_object_p->u.cls.u3.value);
+ 
+-  if ((map_object_p->u.cls.u1.container_flags & ECMA_CONTAINER_FLAGS_WEAK) != 0 && !ecma_is_value_object (key_arg))
++  if ((map_object_p->u.cls.u1.container_flags & ECMA_CONTAINER_FLAGS_WEAK) != 0
++      && !ecma_op_container_key_can_be_held_weakly (key_arg))
+   {
+     return ECMA_VALUE_FALSE;
+   }
+@@ -677,7 +963,8 @@ ecma_op_container_set (ecma_extended_object_t *map_object_p, /**< map object */
+ {
+   ecma_collection_t *container_p = ECMA_GET_INTERNAL_VALUE_POINTER (ecma_collection_t, map_object_p->u.cls.u3.value);
+ 
+-  if ((map_object_p->u.cls.u1.container_flags & ECMA_CONTAINER_FLAGS_WEAK) != 0 && !ecma_is_value_object (key_arg))
++  if ((map_object_p->u.cls.u1.container_flags & ECMA_CONTAINER_FLAGS_WEAK) != 0
++      && !ecma_op_container_key_can_be_held_weakly (key_arg))
+   {
+     return ecma_raise_type_error (ECMA_ERR_KEY_MUST_BE_AN_OBJECT);
+   }
+@@ -688,10 +975,19 @@ ecma_op_container_set (ecma_extended_object_t *map_object_p, /**< map object */
+   {
+     ecma_op_internal_buffer_append (container_p, ecma_op_container_set_noramlize_zero (key_arg), value_arg, lit_id);
+ 
++    /* Record a back-reference from the key to this container so that the entry can be removed
++     * once the key is no longer reachable. Object keys are tracked through their [[WeakRefs]]
++     * internal property; symbol keys are tracked through the symbol weak reference side table. */
+     if ((map_object_p->u.cls.u1.container_flags & ECMA_CONTAINER_FLAGS_WEAK) != 0)
+     {
+-      ecma_object_t *key_p = ecma_get_object_from_value (key_arg);
+-      ecma_op_object_set_weak (key_p, (ecma_object_t *) map_object_p);
++      if (ecma_is_value_object (key_arg))
++      {
++        ecma_op_object_set_weak (ecma_get_object_from_value (key_arg), (ecma_object_t *) map_object_p);
++      }
++      else
++      {
++        ecma_op_container_symbol_set_weak (ecma_get_symbol_from_value (key_arg), (ecma_object_t *) map_object_p);
++      }
+     }
+   }
+   else
+@@ -806,7 +1102,7 @@ ecma_op_container_delete_weak (ecma_extended_object_t *map_object_p, /**< map ob
+                                ecma_value_t key_arg, /**< key argument */
+                                lit_magic_string_id_t lit_id) /**< internal class id */
+ {
+-  if (!ecma_is_value_object (key_arg))
++  if (!ecma_op_container_key_can_be_held_weakly (key_arg))
+   {
+     return ECMA_VALUE_FALSE;
+   }
+@@ -822,8 +1118,19 @@ ecma_op_container_delete_weak (ecma_extended_object_t *map_object_p, /**< map ob
+ 
+   ecma_op_internal_buffer_delete (container_p, (ecma_container_pair_t *) entry_p, lit_id);
+ 
+-  ecma_object_t *key_object_p = ecma_get_object_from_value (key_arg);
+-  ecma_op_object_unref_weak (key_object_p, ecma_make_object_value ((ecma_object_t *) map_object_p));
++  /* Drop the back-reference from the key to this container. Object keys are tracked through
++   * their [[WeakRefs]] internal property; symbol keys are tracked through the symbol weak
++   * reference side table. */
++  if (ecma_is_value_object (key_arg))
++  {
++    ecma_op_object_unref_weak (ecma_get_object_from_value (key_arg),
++                               ecma_make_object_value ((ecma_object_t *) map_object_p));
++  }
++  else
++  {
++    ecma_op_container_symbol_unref_weak (ecma_get_symbol_from_value (key_arg),
++                                         ecma_make_object_value ((ecma_object_t *) map_object_p));
++  }
+ 
+   return ECMA_VALUE_TRUE;
+ } /* ecma_op_container_delete_weak */
+diff --git a/jerry-core/ecma/operations/ecma-container-object.h b/jerry-core/ecma/operations/ecma-container-object.h
+index 92fc6eb..96fbe17 100644
+--- a/jerry-core/ecma/operations/ecma-container-object.h
++++ b/jerry-core/ecma/operations/ecma-container-object.h
+@@ -77,6 +77,9 @@ ecma_value_t ecma_op_container_delete_weak (ecma_extended_object_t *map_object_p
+ ecma_value_t ecma_op_container_find_weak_value (ecma_object_t *object_p, ecma_value_t key_arg);
+ void ecma_op_container_remove_weak_entry (ecma_object_t *object_p, ecma_value_t key_arg);
+ void ecma_op_container_free_entries (ecma_object_t *object_p);
++void ecma_op_container_symbol_set_weak (ecma_string_t *symbol_p, ecma_object_t *object_p);
++void ecma_op_container_symbol_unref_weak (ecma_string_t *symbol_p, ecma_value_t ref_holder);
++void ecma_op_container_symbol_clear_weak (ecma_string_t *symbol_p);
+ ecma_value_t ecma_op_container_create_iterator (ecma_value_t this_arg,
+                                                 ecma_builtin_id_t proto_id,
+                                                 ecma_object_class_type_t iterator_type,
+diff --git a/jerry-core/jcontext/jcontext.h b/jerry-core/jcontext/jcontext.h
+index 397863a..4483bfd 100644
+--- a/jerry-core/jcontext/jcontext.h
++++ b/jerry-core/jcontext/jcontext.h
+@@ -137,6 +137,11 @@ struct jerry_context_t
+   jmem_cpointer_t bigint_list_first_cp; /**< first item of the literal bigint list */
+ #endif /* JERRY_BUILTIN_BIGINT */
+   jmem_cpointer_t global_symbols_cp[ECMA_BUILTIN_GLOBAL_SYMBOL_COUNT]; /**< global symbols */
++#if JERRY_BUILTIN_CONTAINER
++  ecma_collection_t *symbol_weak_refs_p; /**< side table mapping a weakly-held symbol key to the list of
++                                          *   WeakMap/WeakSet objects that reference it, mirroring the
++                                          *   [[WeakRefs]] internal property used for object keys */
++#endif /* JERRY_BUILTIN_CONTAINER */
+ 
+ #if JERRY_MODULE_SYSTEM
+   ecma_module_t *module_current_p; /**< current module context */

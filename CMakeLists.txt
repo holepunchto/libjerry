@@ -17,6 +17,7 @@ fetch_package(
     patches/01-remove-deprecated-enum-conversions.patch
     patches/02-remove-archive-variables.patch
     patches/03-fix-unterminated-string-initialization.patch
+    patches/04-support-symbols-as-weak-keys.patch
 )
 
 add_library(js OBJECT)
