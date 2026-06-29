@@ -2732,6 +2732,23 @@ js_create_object(js_env_t *env, js_value_t **result) {
   return 0;
 }
 
+int
+js_create_object_with_prototype(js_env_t *env, js_value_t *prototype, js_value_t **result) {
+  // Allow continuing even with a pending exception
+
+  js__enter(env);
+
+  jerry_value_t object = jerry_object();
+
+  jerry_value_free(jerry_object_set_proto(object, js__value_from_abi(prototype)));
+
+  *result = js__value_to_abi(object);
+
+  js__attach_to_handle_scope(env, env->scope, *result);
+
+  return 0;
+}
+
 static void
 js__on_function_finalize(void *data, jerry_object_native_info_t *info) {
   free(data);
@@ -4721,6 +4738,35 @@ js_get_prototype(js_env_t *env, js_value_t *object, js_value_t **result) {
   *result = js__value_to_abi(jerry_object_proto(js__value_from_abi(object)));
 
   js__attach_to_handle_scope(env, env->scope, *result);
+
+  return 0;
+}
+
+int
+js_set_prototype(js_env_t *env, js_value_t *object, js_value_t *prototype) {
+  if (env->exception) return js__error(env);
+
+  js__enter(env);
+
+  env->depth++;
+
+  jerry_value_t value = jerry_object_set_proto(js__value_from_abi(object), js__value_from_abi(prototype));
+
+  if (env->depth == 1) js__run_microtasks(env);
+
+  env->depth--;
+
+  if (jerry_value_is_exception(value)) {
+    if (env->depth) {
+      env->exception = value;
+    } else {
+      js__uncaught_exception(env, value);
+    }
+
+    return js__error(env);
+  }
+
+  jerry_value_free(value);
 
   return 0;
 }
