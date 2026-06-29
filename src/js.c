@@ -48,6 +48,7 @@ typedef struct js_promise_rejection_s js_promise_rejection_t;
 typedef struct js_threadsafe_queue_s js_threadsafe_queue_t;
 typedef struct js_teardown_task_s js_teardown_task_t;
 typedef struct js_teardown_queue_s js_teardown_queue_t;
+typedef struct js_env_scope_s js_env_scope_t;
 
 struct js_deferred_teardown_s {
   js_env_t *env;
@@ -89,6 +90,9 @@ struct js_env_s {
   uv_async_t teardown;
   int active_handles;
 
+  jerry_context_t *context;
+  size_t context_size;
+
   js_platform_t *platform;
   js_handle_scope_t *scope;
 
@@ -119,6 +123,11 @@ struct js_env_s {
     js_dynamic_import_cb dynamic_import;
     void *dynamic_import_data;
   } callbacks;
+};
+
+struct js_env_scope_s {
+  jerry_context_t *context;
+  size_t context_size;
 };
 
 struct js_context_s {
@@ -270,27 +279,29 @@ struct js_threadsafe_function_s {
   js_threadsafe_function_cb cb;
 };
 
-static thread_local uint64_t jerry_context_heap_size;
-
+static thread_local uint64_t jerry_heap_size;
 static thread_local jerry_context_t *jerry_context = NULL;
+static thread_local size_t jerry_context_size = 0;
 
 size_t
 jerry_port_context_alloc(size_t context_size) {
-  if (jerry_context_heap_size > UINT32_MAX) jerry_context_heap_size = UINT32_MAX;
+  uint64_t heap_size = jerry_heap_size;
 
-  jerry_context_heap_size += context_size;
+  if (heap_size > UINT32_MAX) heap_size = UINT32_MAX;
+
+  jerry_context_size = heap_size + context_size;
 
 #ifdef _WIN32
-  jerry_context = VirtualAlloc(NULL, jerry_context_heap_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  jerry_context = VirtualAlloc(NULL, jerry_context_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else
-  jerry_context = mmap(NULL, jerry_context_heap_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  jerry_context = mmap(NULL, jerry_context_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
   if (jerry_context == MAP_FAILED) jerry_context = NULL;
 #endif
 
   assert(jerry_context);
 
-  return jerry_context_heap_size;
+  return jerry_context_size;
 }
 
 jerry_context_t *
@@ -301,9 +312,9 @@ jerry_port_context_get(void) {
 void
 jerry_port_context_free(void) {
 #ifdef _WIN32
-  VirtualFree(jerry_context, jerry_context_heap_size, MEM_RELEASE);
+  VirtualFree(jerry_context, jerry_context_size, MEM_RELEASE);
 #else
-  munmap(jerry_context, jerry_context_heap_size);
+  munmap(jerry_context, jerry_context_size);
 #endif
 }
 
@@ -377,6 +388,22 @@ jerry_port_source_read(const char *path, jerry_size_t *len) {
 void
 jerry_port_source_free(uint8_t *buffer) {
   free(buffer);
+}
+
+static inline js_env_scope_t
+js__enter(js_env_t *env) {
+  js_env_scope_t previous = {jerry_context, jerry_context_size};
+
+  jerry_context = env->context;
+  jerry_context_size = env->context_size;
+
+  return previous;
+}
+
+static inline void
+js__exit(js_env_scope_t previous) {
+  jerry_context = previous.context;
+  jerry_context_size = previous.context_size;
 }
 
 static inline jerry_value_t
@@ -704,6 +731,8 @@ js__on_handle_close(uv_handle_t *handle) {
 
 static void
 js__close_env(js_env_t *env) {
+  js__enter(env);
+
   jerry_value_free(env->realm);
   jerry_value_free(env->bindings);
   jerry_value_free(env->exception);
@@ -728,7 +757,7 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   int err;
 
   if (options && options->memory_limit) {
-    jerry_context_heap_size = options->memory_limit;
+    jerry_heap_size = options->memory_limit;
   } else {
     uint64_t constrained_memory = uv_get_constrained_memory();
     uint64_t total_memory = uv_get_total_memory();
@@ -738,15 +767,18 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
     }
 
     if (total_memory > 0) {
-      jerry_context_heap_size = total_memory;
+      jerry_heap_size = total_memory;
     } else {
-      jerry_context_heap_size = 8 * 1024 * 1024;
+      jerry_heap_size = 8 * 1024 * 1024;
     }
   }
 
   js_env_t *env = malloc(sizeof(js_env_t));
 
   jerry_init(JERRY_INIT_EMPTY);
+
+  env->context = jerry_context;
+  env->context_size = jerry_context_size;
 
   jerry_arraybuffer_allocator(js__on_arraybuffer_allocate, js__on_arraybuffer_free, env);
 
@@ -910,6 +942,8 @@ int
 js_close_handle_scope(js_env_t *env, js_handle_scope_t *scope) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   for (size_t i = 0; i < scope->len; i++) {
     jerry_value_free(scope->values[i]);
   }
@@ -951,6 +985,8 @@ int
 js_escape_handle(js_env_t *env, js_escapable_handle_scope_t *scope, js_value_t *escapee, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_t value = jerry_value_copy(js__value_from_abi(escapee));
 
   *result = js__value_to_abi(value);
@@ -963,6 +999,8 @@ js_escape_handle(js_env_t *env, js_escapable_handle_scope_t *scope, js_value_t *
 int
 js_create_context(js_env_t *env, js_context_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   js_context_t *context = malloc(sizeof(js_context_t));
 
@@ -978,6 +1016,8 @@ int
 js_destroy_context(js_env_t *env, js_context_t *context) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_free(context->realm);
 
   free(context);
@@ -988,6 +1028,8 @@ js_destroy_context(js_env_t *env, js_context_t *context) {
 int
 js_enter_context(js_env_t *env, js_context_t *context) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   context->previous = env->realm;
 
@@ -1001,6 +1043,8 @@ js_enter_context(js_env_t *env, js_context_t *context) {
 int
 js_exit_context(js_env_t *env, js_context_t *context) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   env->realm = context->previous;
 
@@ -1053,6 +1097,8 @@ js__module_user_value(jerry_value_t name, jerry_value_t id) {
 int
 js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_t *source, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   int err;
 
@@ -1155,6 +1201,8 @@ int
 js_prepare_script(js_env_t *env, const char *file, size_t len, int offset, js_value_t *source, js_script_t **result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   int err;
 
   if (len == (size_t) -1) len = strlen(file);
@@ -1217,6 +1265,8 @@ int
 js_run_prepared_script(js_env_t *env, js_script_t *script, js_value_t **result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   jerry_value_t realm = jerry_current_realm();
 
   // The parsed bytecode is bound to the realm the script was prepared in. When
@@ -1224,9 +1274,10 @@ js_run_prepared_script(js_env_t *env, js_script_t *script, js_value_t **result) 
   // it must be parsed again to bind it to the currently entered realm.
   bool reparsed = realm != script->realm;
 
-  jerry_value_t handle = reparsed
-    ? js__parse_script(env, script->source, script->name, script->name_len, script->offset, script->id)
-    : script->handle;
+  jerry_value_t handle =
+    reparsed
+      ? js__parse_script(env, script->source, script->name, script->name_len, script->offset, script->id)
+      : script->handle;
 
   jerry_value_free(realm);
 
@@ -1274,6 +1325,8 @@ int
 js_delete_script(js_env_t *env, js_script_t *script) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_free(script->handle);
   jerry_value_free(script->source);
   jerry_value_free(script->realm);
@@ -1298,6 +1351,8 @@ int
 js_get_script_id(js_env_t *env, js_script_t *script, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = js__value_to_abi(jerry_value_copy(script->id));
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -1316,6 +1371,8 @@ js__on_module_import_meta(const jerry_value_t handle, const jerry_value_t meta, 
   js_env_t *env = module->env;
 
   if (module->meta) {
+    js_env_scope_t previous = js__enter(env);
+
     js_handle_scope_t *scope;
     err = js_open_handle_scope(env, &scope);
     assert(err == 0);
@@ -1324,6 +1381,8 @@ js__on_module_import_meta(const jerry_value_t handle, const jerry_value_t meta, 
 
     err = js_close_handle_scope(env, scope);
     assert(err == 0);
+
+    js__exit(previous);
   }
 }
 
@@ -1353,6 +1412,8 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t user_val
     referrer = jerry_value_copy(user_value);
     id = jerry_value_copy(js__default_module_id(env));
   }
+
+  js_env_scope_t previous = js__enter(env);
 
   js_handle_scope_t *scope;
   err = js_open_handle_scope(env, &scope);
@@ -1384,12 +1445,16 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t user_val
   jerry_value_free(id);
   jerry_value_free(assertions);
 
+  js__exit(previous);
+
   return value;
 }
 
 int
 js_create_module(js_env_t *env, const char *name, size_t len, int offset, js_value_t *source, js_module_meta_cb cb, void *data, js_module_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   int err;
 
@@ -1467,6 +1532,8 @@ js__on_module_evaluate(const jerry_value_t handle) {
 
   js_env_t *env = module->env;
 
+  js_env_scope_t previous = js__enter(env);
+
   js_handle_scope_t *scope;
   err = js_open_handle_scope(env, &scope);
   assert(err == 0);
@@ -1486,12 +1553,16 @@ js__on_module_evaluate(const jerry_value_t handle) {
     value = jerry_undefined();
   }
 
+  js__exit(previous);
+
   return value;
 }
 
 int
 js_create_synthetic_module(js_env_t *env, const char *name, size_t len, js_value_t *const export_names[], size_t names_len, js_module_evaluate_cb cb, void *data, js_module_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   jerry_value_t *names = malloc(names_len * sizeof(jerry_value_t));
 
@@ -1537,6 +1608,8 @@ int
 js_delete_module(js_env_t *env, js_module_t *module) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_free(module->handle);
   jerry_value_free(module->id);
 
@@ -1559,6 +1632,8 @@ int
 js_get_module_id(js_env_t *env, js_module_t *module, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = js__value_to_abi(jerry_value_copy(module->id));
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -1569,6 +1644,8 @@ js_get_module_id(js_env_t *env, js_module_t *module, js_value_t **result) {
 int
 js_get_default_module_id(js_env_t *env, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = js__value_to_abi(jerry_value_copy(js__default_module_id(env)));
 
@@ -1581,6 +1658,8 @@ int
 js_get_module_namespace(js_env_t *env, js_module_t *module, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = js__value_to_abi(jerry_module_namespace(module->handle));
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -1591,6 +1670,8 @@ js_get_module_namespace(js_env_t *env, js_module_t *module, js_value_t **result)
 int
 js_set_module_export(js_env_t *env, js_module_t *module, js_value_t *name, js_value_t *value) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   jerry_value_t exception = jerry_native_module_set(module->handle, js__value_from_abi(name), js__value_from_abi(value));
 
@@ -1616,6 +1697,8 @@ js__on_module_resolve(const jerry_value_t specifier, const jerry_value_t referre
   js_module_t *module = data;
 
   js_env_t *env = module->env;
+
+  js_env_scope_t previous = js__enter(env);
 
   js_handle_scope_t *scope;
   err = js_open_handle_scope(env, &scope);
@@ -1646,12 +1729,16 @@ js__on_module_resolve(const jerry_value_t specifier, const jerry_value_t referre
     value = jerry_value_copy(resolved->handle);
   }
 
+  js__exit(previous);
+
   return value;
 }
 
 int
 js_instantiate_module(js_env_t *env, js_module_t *module, js_module_resolve_cb cb, void *data) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   module->resolve = cb;
   module->resolve_data = data;
@@ -1682,6 +1769,8 @@ js_instantiate_module(js_env_t *env, js_module_t *module, js_module_resolve_cb c
 int
 js_run_module(js_env_t *env, js_module_t *module, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   env->depth++;
 
@@ -1782,6 +1871,8 @@ int
 js_create_reference(js_env_t *env, js_value_t *value, uint32_t count, js_ref_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   js_ref_t *reference = malloc(sizeof(js_ref_t));
 
   reference->value = jerry_value_copy(js__value_from_abi(value));
@@ -1800,6 +1891,8 @@ int
 js_delete_reference(js_env_t *env, js_ref_t *reference) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   if (reference->count == 0) js__clear_weak_reference(env, reference);
 
   jerry_value_free(reference->value);
@@ -1813,6 +1906,8 @@ int
 js_reference_ref(js_env_t *env, js_ref_t *reference, uint32_t *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   reference->count++;
 
   if (reference->count == 1) js__clear_weak_reference(env, reference);
@@ -1825,6 +1920,8 @@ js_reference_ref(js_env_t *env, js_ref_t *reference, uint32_t *result) {
 int
 js_reference_unref(js_env_t *env, js_ref_t *reference, uint32_t *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   if (reference->count > 0) {
     reference->count--;
@@ -1840,6 +1937,8 @@ js_reference_unref(js_env_t *env, js_ref_t *reference, uint32_t *result) {
 int
 js_get_reference_value(js_env_t *env, js_ref_t *reference, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   if (reference->finalized) *result = NULL;
   else {
@@ -1923,6 +2022,8 @@ js_define_class(js_env_t *env, const char *name, size_t len, js_function_cb cons
 int
 js_define_properties(js_env_t *env, js_value_t *object, js_property_descriptor_t const properties[], size_t properties_len) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   int err;
 
@@ -2021,6 +2122,8 @@ int
 js_wrap(js_env_t *env, js_value_t *object, void *data, js_finalize_cb finalize_cb, void *finalize_hint, js_ref_t **result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   js_finalizer_t *finalizer = malloc(sizeof(js_finalizer_t));
 
   finalizer->env = env;
@@ -2039,6 +2142,8 @@ int
 js_unwrap(js_env_t *env, js_value_t *object, void **result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   js_finalizer_t *finalizer = jerry_object_get_native_ptr(js__value_from_abi(object), &js__wrap);
 
   *result = finalizer->data;
@@ -2049,6 +2154,8 @@ js_unwrap(js_env_t *env, js_value_t *object, void **result) {
 int
 js_remove_wrap(js_env_t *env, js_value_t *object, void **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   js_finalizer_t *finalizer = jerry_object_get_native_ptr(js__value_from_abi(object), &js__wrap);
 
@@ -2188,6 +2295,8 @@ int
 js_create_delegate(js_env_t *env, const js_delegate_callbacks_t *callbacks, void *data, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   int err;
 
   js_delegate_t *delegate = malloc(sizeof(js_delegate_t));
@@ -2285,6 +2394,8 @@ int
 js_add_finalizer(js_env_t *env, js_value_t *object, void *data, js_finalize_cb finalize_cb, void *finalize_hint, js_ref_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   js_finalizer_list_t *next = malloc(sizeof(js_finalizer_list_t));
 
   js_finalizer_t *finalizer = &next->finalizer;
@@ -2316,6 +2427,8 @@ int
 js_add_type_tag(js_env_t *env, js_value_t *object, const js_type_tag_t *tag) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   int err;
 
   if (jerry_object_has_native_ptr(js__value_from_abi(object), &js__type_tag)) {
@@ -2339,6 +2452,8 @@ int
 js_check_type_tag(js_env_t *env, js_value_t *object, const js_type_tag_t *tag, bool *result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   js_type_tag_t *existing = jerry_object_get_native_ptr(js__value_from_abi(object), &js__type_tag);
 
   *result = existing != NULL && existing->lower == tag->lower && existing->upper == tag->upper;
@@ -2349,6 +2464,8 @@ js_check_type_tag(js_env_t *env, js_value_t *object, const js_type_tag_t *tag, b
 int
 js_create_int32(js_env_t *env, int32_t value, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = js__value_to_abi(jerry_number((double) value));
 
@@ -2361,6 +2478,8 @@ int
 js_create_uint32(js_env_t *env, uint32_t value, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = js__value_to_abi(jerry_number((double) value));
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -2371,6 +2490,8 @@ js_create_uint32(js_env_t *env, uint32_t value, js_value_t **result) {
 int
 js_create_int64(js_env_t *env, int64_t value, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = js__value_to_abi(jerry_number((double) value));
 
@@ -2383,6 +2504,8 @@ int
 js_create_double(js_env_t *env, double value, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = js__value_to_abi(jerry_number(value));
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -2393,6 +2516,8 @@ js_create_double(js_env_t *env, double value, js_value_t **result) {
 int
 js_create_bigint_int64(js_env_t *env, int64_t value, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = js__value_to_abi(jerry_bigint((uint64_t *) &value, 1, value < 0));
 
@@ -2405,6 +2530,8 @@ int
 js_create_bigint_uint64(js_env_t *env, uint64_t value, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = js__value_to_abi(jerry_bigint(&value, 1, false));
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -2416,6 +2543,8 @@ int
 js_create_bigint_words(js_env_t *env, int sign, const uint64_t *words, size_t len, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = js__value_to_abi(jerry_bigint(words, (uint32_t) len, sign));
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -2425,6 +2554,8 @@ js_create_bigint_words(js_env_t *env, int sign, const uint64_t *words, size_t le
 
 int
 js_create_string_utf8(js_env_t *env, const utf8_t *str, size_t len, js_value_t **result) {
+  js__enter(env);
+
   int err;
 
   if (len == (size_t) -1) len = strlen((const char *) str);
@@ -2447,6 +2578,8 @@ js_create_string_utf8(js_env_t *env, const utf8_t *str, size_t len, js_value_t *
 
 int
 js_create_string_utf16le(js_env_t *env, const utf16_t *str, size_t len, js_value_t **result) {
+  js__enter(env);
+
   int err;
 
   if (len == (size_t) -1) len = wcslen((wchar_t *) str);
@@ -2477,6 +2610,8 @@ js_create_string_utf16le(js_env_t *env, const utf16_t *str, size_t len, js_value
 
 int
 js_create_string_latin1(js_env_t *env, const latin1_t *str, size_t len, js_value_t **result) {
+  js__enter(env);
+
   int err;
 
   if (len == (size_t) -1) len = strlen((char *) str);
@@ -2563,6 +2698,8 @@ int
 js_create_symbol(js_env_t *env, js_value_t *description, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_t symbol = jerry_symbol_with_description(js__value_from_abi(description));
 
   *result = js__value_to_abi(symbol);
@@ -2585,6 +2722,8 @@ js_symbol_for(js_env_t *env, const char *description, size_t len, js_value_t **r
 int
 js_create_object(js_env_t *env, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = js__value_to_abi(jerry_object());
 
@@ -2617,6 +2756,8 @@ js__on_function_call(const jerry_call_info_t *info, const jerry_value_t argv[], 
 
   js_env_t *env = callback->env;
 
+  js_env_scope_t previous = js__enter(env);
+
   js_handle_scope_t *scope;
   err = js_open_handle_scope(env, &scope);
   assert(err == 0);
@@ -2636,12 +2777,16 @@ js__on_function_call(const jerry_call_info_t *info, const jerry_value_t argv[], 
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
 
+  js__exit(previous);
+
   return value;
 }
 
 int
 js_create_function(js_env_t *env, const char *name, size_t len, js_function_cb cb, void *data, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   js_callback_t *callback = malloc(sizeof(js_callback_t));
 
@@ -2663,6 +2808,8 @@ js_create_function(js_env_t *env, const char *name, size_t len, js_function_cb c
 int
 js_create_function_with_source(js_env_t *env, const char *name, size_t name_len, const char *file, size_t file_len, js_value_t *const args[], size_t args_len, int offset, js_value_t *source, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   int err;
 
@@ -2752,6 +2899,8 @@ int
 js_get_function_id(js_env_t *env, js_value_t *function, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   // Recover the identifier carried by the user value of the function. Functions
   // compiled with `js_create_function_with_source()` carry a two-element array
   // of `[name, id]`, but fall back to the environment's default identifier
@@ -2780,6 +2929,8 @@ int
 js_create_array(js_env_t *env, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = js__value_to_abi(jerry_array(0));
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -2790,6 +2941,8 @@ js_create_array(js_env_t *env, js_value_t **result) {
 int
 js_create_array_with_length(js_env_t *env, size_t len, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = js__value_to_abi(jerry_array(len));
 
@@ -2815,6 +2968,8 @@ int
 js_create_external(js_env_t *env, void *data, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   js_finalizer_t *finalizer = malloc(sizeof(js_finalizer_t));
 
   finalizer->env = env;
@@ -2837,6 +2992,8 @@ int
 js_create_date(js_env_t *env, double time, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_t global = jerry_current_realm();
   jerry_value_t constructor = jerry_object_get_sz(global, "Date");
   jerry_value_t arg = jerry_number(time);
@@ -2856,6 +3013,8 @@ js_create_date(js_env_t *env, double time, js_value_t **result) {
 int
 js_create_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   jerry_value_t error = jerry_error(JERRY_ERROR_COMMON, js__value_from_abi(message));
 
@@ -2888,6 +3047,8 @@ int
 js_create_type_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_t error = jerry_error(JERRY_ERROR_TYPE, js__value_from_abi(message));
 
   if (code) {
@@ -2918,6 +3079,8 @@ js_create_type_error(js_env_t *env, js_value_t *code, js_value_t *message, js_va
 int
 js_create_range_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   jerry_value_t error = jerry_error(JERRY_ERROR_RANGE, js__value_from_abi(message));
 
@@ -2950,6 +3113,8 @@ int
 js_create_syntax_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_t error = jerry_error(JERRY_ERROR_SYNTAX, js__value_from_abi(message));
 
   if (code) {
@@ -2981,6 +3146,8 @@ int
 js_create_reference_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_t error = jerry_error(JERRY_ERROR_REFERENCE, js__value_from_abi(message));
 
   if (code) {
@@ -3010,6 +3177,8 @@ js_create_reference_error(js_env_t *env, js_value_t *code, js_value_t *message, 
 
 int
 js_get_error_location(js_env_t *env, js_value_t *error, js_error_location_t *result) {
+  js__enter(env);
+
   result->name = js__value_to_abi(jerry_undefined());
   result->source = js__value_to_abi(jerry_undefined());
   result->line = 0;
@@ -3022,6 +3191,8 @@ js_get_error_location(js_env_t *env, js_value_t *error, js_error_location_t *res
 int
 js_create_promise(js_env_t *env, js_deferred_t **deferred, js_value_t **promise) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   js_deferred_t *result = malloc(sizeof(js_deferred_t));
 
@@ -3038,6 +3209,8 @@ int
 js_resolve_deferred(js_env_t *env, js_deferred_t *deferred, js_value_t *resolution) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_free(jerry_promise_resolve(deferred->promise, js__value_from_abi(resolution)));
 
   jerry_value_free(deferred->promise);
@@ -3053,6 +3226,8 @@ int
 js_reject_deferred(js_env_t *env, js_deferred_t *deferred, js_value_t *resolution) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_free(jerry_promise_reject(deferred->promise, js__value_from_abi(resolution)));
 
   jerry_value_free(deferred->promise);
@@ -3067,6 +3242,8 @@ js_reject_deferred(js_env_t *env, js_deferred_t *deferred, js_value_t *resolutio
 int
 js_get_promise_state(js_env_t *env, js_value_t *promise, js_promise_state_t *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   jerry_promise_state_t state = jerry_promise_state(js__value_from_abi(promise));
 
@@ -3090,6 +3267,8 @@ int
 js_get_promise_result(js_env_t *env, js_value_t *promise, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_t value = jerry_promise_result(js__value_from_abi(promise));
 
   assert(jerry_value_is_exception(value) == false);
@@ -3104,6 +3283,8 @@ js_get_promise_result(js_env_t *env, js_value_t *promise, js_value_t **result) {
 int
 js_create_arraybuffer(js_env_t *env, size_t len, void **data, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   int err;
 
@@ -3128,6 +3309,8 @@ js_create_arraybuffer(js_env_t *env, size_t len, void **data, js_value_t **resul
 int
 js_create_arraybuffer_with_backing_store(js_env_t *env, js_arraybuffer_backing_store_t *backing_store, void **data, size_t *len, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   backing_store->references++;
 
@@ -3156,6 +3339,8 @@ int
 js_create_external_arraybuffer(js_env_t *env, void *data, size_t len, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   js_arraybuffer_attachment_t *attachment = malloc(sizeof(js_arraybuffer_attachment_t));
 
   attachment->type = js_arraybuffer_finalizer;
@@ -3178,6 +3363,8 @@ int
 js_detach_arraybuffer(js_env_t *env, js_value_t *arraybuffer) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_free(jerry_arraybuffer_detach(js__value_from_abi(arraybuffer)));
 
   return 0;
@@ -3186,6 +3373,8 @@ js_detach_arraybuffer(js_env_t *env, js_value_t *arraybuffer) {
 int
 js_get_arraybuffer_backing_store(js_env_t *env, js_value_t *arraybuffer, js_arraybuffer_backing_store_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   js_arraybuffer_backing_store_t *backing_store = malloc(sizeof(js_arraybuffer_backing_store_t));
 
@@ -3202,6 +3391,8 @@ js_get_arraybuffer_backing_store(js_env_t *env, js_value_t *arraybuffer, js_arra
 int
 js_create_sharedarraybuffer(js_env_t *env, size_t len, void **data, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   int err;
 
@@ -3226,6 +3417,8 @@ js_create_sharedarraybuffer(js_env_t *env, size_t len, void **data, js_value_t *
 int
 js_create_sharedarraybuffer_with_backing_store(js_env_t *env, js_arraybuffer_backing_store_t *backing_store, void **data, size_t *len, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   if (data) *data = backing_store->data;
 
@@ -3253,6 +3446,8 @@ int
 js_create_external_sharedarraybuffer(js_env_t *env, void *data, size_t len, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   js_arraybuffer_attachment_t *attachment = malloc(sizeof(js_arraybuffer_attachment_t));
 
   attachment->type = js_arraybuffer_finalizer;
@@ -3275,6 +3470,8 @@ int
 js_get_sharedarraybuffer_backing_store(js_env_t *env, js_value_t *sharedarraybuffer, js_arraybuffer_backing_store_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   js_arraybuffer_backing_store_t *backing_store = malloc(sizeof(js_arraybuffer_backing_store_t));
 
   backing_store->owner = 0;
@@ -3294,6 +3491,8 @@ js_get_sharedarraybuffer_backing_store(js_env_t *env, js_value_t *sharedarraybuf
 int
 js_release_arraybuffer_backing_store(js_env_t *env, js_arraybuffer_backing_store_t *backing_store) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   if (--backing_store->references == 0) {
     if (backing_store->owner) {
@@ -3315,6 +3514,8 @@ js_release_arraybuffer_backing_store(js_env_t *env, js_arraybuffer_backing_store
 int
 js_create_typedarray(js_env_t *env, js_typedarray_type_t type, size_t len, js_value_t *arraybuffer, size_t offset, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   int err;
 
@@ -3380,6 +3581,8 @@ int
 js_create_dataview(js_env_t *env, size_t len, js_value_t *arraybuffer, size_t offset, js_value_t **result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   jerry_value_t dataview = jerry_dataview(js__value_from_abi(arraybuffer), offset, len);
 
   *result = js__value_to_abi(dataview);
@@ -3393,6 +3596,8 @@ int
 js_coerce_to_boolean(js_env_t *env, js_value_t *value, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_t boolean = jerry_boolean(jerry_value_to_boolean(js__value_from_abi(value)));
 
   *result = js__value_to_abi(boolean);
@@ -3405,6 +3610,8 @@ js_coerce_to_boolean(js_env_t *env, js_value_t *value, js_value_t **result) {
 int
 js_coerce_to_number(js_env_t *env, js_value_t *value, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   jerry_value_t number = jerry_value_to_number(js__value_from_abi(value));
 
@@ -3429,6 +3636,8 @@ int
 js_coerce_to_string(js_env_t *env, js_value_t *value, js_value_t **result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   jerry_value_t string = jerry_value_to_string(js__value_from_abi(value));
 
   if (jerry_value_is_exception(string)) {
@@ -3452,6 +3661,8 @@ int
 js_coerce_to_object(js_env_t *env, js_value_t *value, js_value_t **result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   jerry_value_t object = jerry_value_to_object(js__value_from_abi(value));
 
   if (jerry_value_is_exception(object)) {
@@ -3474,6 +3685,8 @@ js_coerce_to_object(js_env_t *env, js_value_t *value, js_value_t **result) {
 int
 js_typeof(js_env_t *env, js_value_t *value, js_value_type_t *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   jerry_type_t type = jerry_value_type(js__value_from_abi(value));
 
@@ -3517,6 +3730,8 @@ int
 js_instanceof(js_env_t *env, js_value_t *object, js_value_t *constructor, bool *result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   env->depth++;
 
   jerry_value_t value = jerry_binary_op(JERRY_BIN_OP_INSTANCEOF, js__value_from_abi(object), js__value_from_abi(constructor));
@@ -3544,6 +3759,8 @@ int
 js_is_undefined(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_is_undefined(js__value_from_abi(value));
 
   return 0;
@@ -3552,6 +3769,8 @@ js_is_undefined(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_null(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_value_is_null(js__value_from_abi(value));
 
@@ -3562,6 +3781,8 @@ int
 js_is_boolean(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_is_boolean(js__value_from_abi(value));
 
   return 0;
@@ -3571,6 +3792,8 @@ int
 js_is_number(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_is_number(js__value_from_abi(value));
 
   return 0;
@@ -3579,6 +3802,8 @@ js_is_number(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_int32(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   if (jerry_value_is_number(js__value_from_abi(value))) {
     double integral, number = jerry_value_as_number(js__value_from_abi(value));
@@ -3595,6 +3820,8 @@ int
 js_is_uint32(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   if (jerry_value_is_number(js__value_from_abi(value))) {
     double integral, number = jerry_value_as_number(js__value_from_abi(value));
 
@@ -3610,6 +3837,8 @@ int
 js_is_string(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_is_string(js__value_from_abi(value));
 
   return 0;
@@ -3618,6 +3847,8 @@ js_is_string(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_symbol(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_value_is_symbol(js__value_from_abi(value));
 
@@ -3628,6 +3859,8 @@ int
 js_is_object(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_is_object(js__value_from_abi(value));
 
   return 0;
@@ -3636,6 +3869,8 @@ js_is_object(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_function(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_value_is_function(js__value_from_abi(value));
 
@@ -3646,6 +3881,8 @@ int
 js_is_async_function(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_is_async_function(js__value_from_abi(value));
 
   return 0;
@@ -3654,6 +3891,8 @@ js_is_async_function(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_generator_function(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_function_type(js__value_from_abi(value)) == JERRY_FUNCTION_TYPE_GENERATOR;
 
@@ -3664,6 +3903,8 @@ int
 js_is_generator(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_GENERATOR;
 
   return 0;
@@ -3672,6 +3913,8 @@ js_is_generator(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_arguments(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_ARGUMENTS;
 
@@ -3682,6 +3925,8 @@ int
 js_is_array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_is_array(js__value_from_abi(value));
 
   return 0;
@@ -3691,6 +3936,8 @@ int
 js_is_external(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_object_has_native_ptr(js__value_from_abi(value), &js__external);
 
   return 0;
@@ -3699,6 +3946,8 @@ js_is_external(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_wrapped(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_object_has_native_ptr(js__value_from_abi(value), &js__wrap);
 
@@ -3716,6 +3965,8 @@ int
 js_is_bigint(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_is_bigint(js__value_from_abi(value));
 
   return 0;
@@ -3724,6 +3975,8 @@ js_is_bigint(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_date(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_DATE;
 
@@ -3734,6 +3987,8 @@ int
 js_is_regexp(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_REGEXP;
 
   return 0;
@@ -3742,6 +3997,8 @@ js_is_regexp(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_error(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_ERROR;
 
@@ -3752,6 +4009,8 @@ int
 js_is_promise(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_is_promise(js__value_from_abi(value));
 
   return 0;
@@ -3760,6 +4019,8 @@ js_is_promise(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_proxy(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_value_is_proxy(js__value_from_abi(value));
 
@@ -3770,6 +4031,8 @@ int
 js_is_map(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_container_type(js__value_from_abi(value)) == JERRY_CONTAINER_TYPE_MAP;
 
   return 0;
@@ -3778,6 +4041,8 @@ js_is_map(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_map_iterator(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_iterator_type(js__value_from_abi(value)) == JERRY_ITERATOR_TYPE_MAP;
 
@@ -3788,6 +4053,8 @@ int
 js_is_set(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_container_type(js__value_from_abi(value)) == JERRY_CONTAINER_TYPE_SET;
 
   return 0;
@@ -3796,6 +4063,8 @@ js_is_set(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_set_iterator(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_iterator_type(js__value_from_abi(value)) == JERRY_ITERATOR_TYPE_SET;
 
@@ -3806,6 +4075,8 @@ int
 js_is_weak_map(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_container_type(js__value_from_abi(value)) == JERRY_CONTAINER_TYPE_WEAKMAP;
 
   return 0;
@@ -3814,6 +4085,8 @@ js_is_weak_map(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_weak_set(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_container_type(js__value_from_abi(value)) == JERRY_CONTAINER_TYPE_WEAKSET;
 
@@ -3824,6 +4097,8 @@ int
 js_is_weak_ref(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_WEAKREF;
 
   return 0;
@@ -3832,6 +4107,8 @@ js_is_weak_ref(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_arraybuffer(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_value_is_arraybuffer(js__value_from_abi(value));
 
@@ -3842,6 +4119,8 @@ int
 js_is_detached_arraybuffer(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_is_arraybuffer(js__value_from_abi(value)) && jerry_arraybuffer_data(js__value_from_abi(value)) == NULL;
 
   return 0;
@@ -3850,6 +4129,8 @@ js_is_detached_arraybuffer(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_sharedarraybuffer(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_value_is_shared_arraybuffer(js__value_from_abi(value));
 
@@ -3860,6 +4141,8 @@ int
 js_is_typedarray(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_is_typedarray(js__value_from_abi(value));
 
   return 0;
@@ -3868,6 +4151,8 @@ js_is_typedarray(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_int8array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_INT8;
 
@@ -3878,6 +4163,8 @@ int
 js_is_uint8array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_UINT8;
 
   return 0;
@@ -3886,6 +4173,8 @@ js_is_uint8array(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_uint8clampedarray(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_UINT8CLAMPED;
 
@@ -3896,6 +4185,8 @@ int
 js_is_int16array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_INT16;
 
   return 0;
@@ -3904,6 +4195,8 @@ js_is_int16array(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_uint16array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_UINT16;
 
@@ -3914,6 +4207,8 @@ int
 js_is_int32array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_INT32;
 
   return 0;
@@ -3923,6 +4218,8 @@ int
 js_is_uint32array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_UINT32;
 
   return 0;
@@ -3931,6 +4228,8 @@ js_is_uint32array(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_float16array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
 #ifdef JERRY_TYPEDARRAY_FLOAT16
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_FLOAT16;
@@ -3945,6 +4244,8 @@ int
 js_is_float32array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_FLOAT32;
 
   return 0;
@@ -3953,6 +4254,8 @@ js_is_float32array(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_float64array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_FLOAT64;
 
@@ -3963,6 +4266,8 @@ int
 js_is_bigint64array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_BIGINT64;
 
   return 0;
@@ -3971,6 +4276,8 @@ js_is_bigint64array(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_is_biguint64array(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_typedarray_type(js__value_from_abi(value)) == JERRY_TYPEDARRAY_BIGUINT64;
 
@@ -3981,6 +4288,8 @@ int
 js_is_dataview(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_is_dataview(js__value_from_abi(value));
 
   return 0;
@@ -3990,6 +4299,8 @@ int
 js_is_module_namespace(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_MODULE_NAMESPACE;
 
   return 0;
@@ -3998,6 +4309,8 @@ js_is_module_namespace(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_strict_equals(js_env_t *env, js_value_t *a, js_value_t *b, bool *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   jerry_value_t value = jerry_binary_op(JERRY_BIN_OP_STRICT_EQUAL, js__value_from_abi(a), js__value_from_abi(b));
 
@@ -4012,6 +4325,8 @@ int
 js_get_global(js_env_t *env, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = js__value_to_abi(jerry_current_realm());
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -4022,6 +4337,8 @@ js_get_global(js_env_t *env, js_value_t **result) {
 int
 js_get_undefined(js_env_t *env, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = js__value_to_abi(jerry_undefined());
 
@@ -4034,6 +4351,8 @@ int
 js_get_null(js_env_t *env, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = js__value_to_abi(jerry_null());
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -4044,6 +4363,8 @@ js_get_null(js_env_t *env, js_value_t **result) {
 int
 js_get_boolean(js_env_t *env, bool value, js_value_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = js__value_to_abi(jerry_boolean(value));
 
@@ -4056,6 +4377,8 @@ int
 js_get_value_bool(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_to_boolean(js__value_from_abi(value));
 
   return 0;
@@ -4064,6 +4387,8 @@ js_get_value_bool(js_env_t *env, js_value_t *value, bool *result) {
 int
 js_get_value_int32(js_env_t *env, js_value_t *value, int32_t *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = jerry_value_as_int32(js__value_from_abi(value));
 
@@ -4074,6 +4399,8 @@ int
 js_get_value_uint32(js_env_t *env, js_value_t *value, uint32_t *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_as_uint32(js__value_from_abi(value));
 
   return 0;
@@ -4082,6 +4409,8 @@ js_get_value_uint32(js_env_t *env, js_value_t *value, uint32_t *result) {
 int
 js_get_value_int64(js_env_t *env, js_value_t *value, int64_t *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   *result = (int64_t) jerry_value_as_number(js__value_from_abi(value));
 
@@ -4092,6 +4421,8 @@ int
 js_get_value_double(js_env_t *env, js_value_t *value, double *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_value_as_number(js__value_from_abi(value));
 
   return 0;
@@ -4100,6 +4431,8 @@ js_get_value_double(js_env_t *env, js_value_t *value, double *result) {
 int
 js_get_value_bigint_int64(js_env_t *env, js_value_t *value, int64_t *result, bool *lossless) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   uint32_t digit_count = jerry_bigint_digit_count(js__value_from_abi(value));
 
@@ -4129,6 +4462,8 @@ int
 js_get_value_bigint_uint64(js_env_t *env, js_value_t *value, uint64_t *result, bool *lossless) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   uint32_t digit_count = jerry_bigint_digit_count(js__value_from_abi(value));
 
   uint64_t digit = 0;
@@ -4146,6 +4481,8 @@ js_get_value_bigint_uint64(js_env_t *env, js_value_t *value, uint64_t *result, b
 int
 js_get_value_bigint_words(js_env_t *env, js_value_t *value, int *sign, uint64_t *words, size_t len, size_t *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   uint32_t digit_count = jerry_bigint_digit_count(js__value_from_abi(value));
 
@@ -4169,6 +4506,8 @@ int
 js_get_value_string_utf8(js_env_t *env, js_value_t *value, utf8_t *str, size_t len, size_t *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   if (str == NULL) {
     *result = jerry_string_size(js__value_from_abi(value), JERRY_ENCODING_UTF8);
   } else if (len != 0) {
@@ -4185,6 +4524,8 @@ js_get_value_string_utf8(js_env_t *env, js_value_t *value, utf8_t *str, size_t l
 int
 js_get_value_string_utf16le(js_env_t *env, js_value_t *value, utf16_t *str, size_t len, size_t *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   jerry_value_t string = js__value_from_abi(value);
 
@@ -4223,6 +4564,8 @@ int
 js_get_value_string_latin1(js_env_t *env, js_value_t *value, latin1_t *str, size_t len, size_t *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_t string = js__value_from_abi(value);
 
   jerry_size_t utf8_len = jerry_string_size(string, JERRY_ENCODING_UTF8);
@@ -4260,6 +4603,8 @@ int
 js_get_value_external(js_env_t *env, js_value_t *value, void **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   js_finalizer_t *finalizer = jerry_object_get_native_ptr(js__value_from_abi(value), &js__external);
 
   *result = finalizer->data;
@@ -4270,6 +4615,8 @@ js_get_value_external(js_env_t *env, js_value_t *value, void **result) {
 int
 js_get_value_date(js_env_t *env, js_value_t *value, double *result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   jerry_value_t number = jerry_value_to_number(js__value_from_abi(value));
 
@@ -4284,6 +4631,8 @@ int
 js_get_array_length(js_env_t *env, js_value_t *array, uint32_t *result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = jerry_array_length(js__value_from_abi(array));
 
   return 0;
@@ -4292,6 +4641,8 @@ js_get_array_length(js_env_t *env, js_value_t *array, uint32_t *result) {
 int
 js_get_array_elements(js_env_t *env, js_value_t *array, js_value_t **elements, size_t len, size_t offset, uint32_t *result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   uint32_t written = 0;
 
@@ -4332,6 +4683,8 @@ int
 js_set_array_elements(js_env_t *env, js_value_t *array, const js_value_t *elements[], size_t len, size_t offset) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   env->depth++;
 
   for (uint32_t i = 0, n = len, j = offset; i < n; i++, j++) {
@@ -4363,6 +4716,8 @@ int
 js_get_prototype(js_env_t *env, js_value_t *object, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   *result = js__value_to_abi(jerry_object_proto(js__value_from_abi(object)));
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -4373,6 +4728,8 @@ js_get_prototype(js_env_t *env, js_value_t *object, js_value_t **result) {
 int
 js_get_property_names(js_env_t *env, js_value_t *object, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   env->depth++;
 
@@ -4405,6 +4762,8 @@ js_get_property_names(js_env_t *env, js_value_t *object, js_value_t **result) {
 int
 js_get_filtered_property_names(js_env_t *env, js_value_t *object, js_key_collection_mode_t mode, js_property_filter_t property_filter, js_index_filter_t index_filter, js_key_conversion_mode_t key_conversion, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   int filter = JERRY_PROPERTY_FILTER_ALL;
 
@@ -4472,6 +4831,8 @@ int
 js_get_property(js_env_t *env, js_value_t *object, js_value_t *key, js_value_t **result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   env->depth++;
 
   jerry_value_t value = jerry_object_get(js__value_from_abi(object), js__value_from_abi(key));
@@ -4504,6 +4865,8 @@ int
 js_has_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   env->depth++;
 
   jerry_value_t value = jerry_object_has(js__value_from_abi(object), js__value_from_abi(key));
@@ -4532,6 +4895,8 @@ js_has_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *result
 int
 js_has_own_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   env->depth++;
 
@@ -4562,6 +4927,8 @@ int
 js_set_property(js_env_t *env, js_value_t *object, js_value_t *key, js_value_t *value) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   env->depth++;
 
   jerry_value_t exception = jerry_object_set(js__value_from_abi(object), js__value_from_abi(key), js__value_from_abi(value));
@@ -4588,6 +4955,8 @@ js_set_property(js_env_t *env, js_value_t *object, js_value_t *key, js_value_t *
 int
 js_delete_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   env->depth++;
 
@@ -4617,6 +4986,8 @@ js_delete_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *res
 int
 js_get_named_property(js_env_t *env, js_value_t *object, const char *name, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   env->depth++;
 
@@ -4650,6 +5021,8 @@ int
 js_has_named_property(js_env_t *env, js_value_t *object, const char *name, bool *result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   env->depth++;
 
   jerry_value_t value = jerry_object_has_sz(js__value_from_abi(object), name);
@@ -4679,6 +5052,8 @@ int
 js_set_named_property(js_env_t *env, js_value_t *object, const char *name, js_value_t *value) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   env->depth++;
 
   jerry_value_t exception = jerry_object_set_sz(js__value_from_abi(object), name, js__value_from_abi(value));
@@ -4705,6 +5080,8 @@ js_set_named_property(js_env_t *env, js_value_t *object, const char *name, js_va
 int
 js_delete_named_property(js_env_t *env, js_value_t *object, const char *name, bool *result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   env->depth++;
 
@@ -4734,6 +5111,8 @@ js_delete_named_property(js_env_t *env, js_value_t *object, const char *name, bo
 int
 js_get_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   env->depth++;
 
@@ -4766,6 +5145,8 @@ js_get_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t **r
 int
 js_has_element(js_env_t *env, js_value_t *object, uint32_t index, bool *result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   env->depth++;
 
@@ -4804,6 +5185,8 @@ int
 js_set_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t *value) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   env->depth++;
 
   jerry_value_t exception = jerry_object_set_index(js__value_from_abi(object), index, js__value_from_abi(value));
@@ -4830,6 +5213,8 @@ js_set_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t *va
 int
 js_delete_element(js_env_t *env, js_value_t *object, uint32_t index, bool *result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   env->depth++;
 
@@ -4859,6 +5244,8 @@ js_delete_element(js_env_t *env, js_value_t *object, uint32_t index, bool *resul
 int
 js_get_string_view(js_env_t *env, js_value_t *string, js_string_encoding_t *encoding, const void **str, size_t *len, js_string_view_t **result) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   jerry_size_t view_len = jerry_string_size(js__value_from_abi(string), JERRY_ENCODING_UTF8);
 
@@ -4891,6 +5278,8 @@ js_release_string_view(js_env_t *env, js_string_view_t *view) {
 int
 js_get_callback_info(js_env_t *env, const js_callback_info_t *info, size_t *argc, js_value_t *argv[], js_value_t **receiver, void **data) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   if (argv) {
     size_t i = 0, n = info->argc < *argc ? info->argc : *argc;
@@ -4945,6 +5334,8 @@ int
 js_get_arraybuffer_info(js_env_t *env, js_value_t *arraybuffer, void **data, size_t *len) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   if (data) *data = jerry_arraybuffer_data(js__value_from_abi(arraybuffer));
 
   if (len) *len = jerry_arraybuffer_size(js__value_from_abi(arraybuffer));
@@ -4956,6 +5347,8 @@ int
 js_get_sharedarraybuffer_info(js_env_t *env, js_value_t *sharedarraybuffer, void **data, size_t *len) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   if (data) *data = jerry_arraybuffer_data(js__value_from_abi(sharedarraybuffer));
 
   if (len) *len = jerry_arraybuffer_size(js__value_from_abi(sharedarraybuffer));
@@ -4966,6 +5359,8 @@ js_get_sharedarraybuffer_info(js_env_t *env, js_value_t *sharedarraybuffer, void
 int
 js_get_typedarray_info(js_env_t *env, js_value_t *typedarray, js_typedarray_type_t *type, void **data, size_t *len, js_value_t **arraybuffer, size_t *offset) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   jerry_length_t byte_offset, byte_len;
 
@@ -5035,6 +5430,8 @@ int
 js_get_dataview_info(js_env_t *env, js_value_t *dataview, void **data, size_t *len, js_value_t **arraybuffer, size_t *offset) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_length_t byte_offset, byte_len;
 
   jerry_value_t buffer = jerry_dataview_buffer(js__value_from_abi(dataview), &byte_offset, &byte_len);
@@ -5058,6 +5455,8 @@ js_get_dataview_info(js_env_t *env, js_value_t *dataview, void **data, size_t *l
 int
 js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size_t argc, js_value_t *const argv[], js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   jerry_value_t *args = malloc(argc * sizeof(jerry_value_t));
 
@@ -5099,6 +5498,8 @@ int
 js_call_function_with_checkpoint(js_env_t *env, js_value_t *receiver, js_value_t *function, size_t argc, js_value_t *const argv[], js_value_t **result) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   jerry_value_t *args = malloc(argc * sizeof(jerry_value_t));
 
   for (size_t i = 0; i < argc; i++) {
@@ -5138,6 +5539,8 @@ js_call_function_with_checkpoint(js_env_t *env, js_value_t *receiver, js_value_t
 int
 js_new_instance(js_env_t *env, js_value_t *constructor, size_t argc, js_value_t *const argv[], js_value_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   jerry_value_t *args = malloc(argc * sizeof(jerry_value_t));
 
@@ -5364,6 +5767,8 @@ js__on_threadsafe_function_async(uv_async_t *handle) {
 int
 js_create_threadsafe_function(js_env_t *env, js_value_t *function, size_t queue_limit, size_t initial_thread_count, js_finalize_cb finalize_cb, void *finalize_hint, void *context, js_threadsafe_function_cb cb, js_threadsafe_function_t **result) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   int err;
 
@@ -5598,6 +6003,8 @@ int
 js_throw(js_env_t *env, js_value_t *error) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   env->exception = jerry_throw_value(js__value_from_abi(error), false);
 
   return 0;
@@ -5629,6 +6036,8 @@ js__vformat(char **result, size_t *size, const char *message, va_list args) {
 int
 js_throw_error(js_env_t *env, const char *code, const char *message) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_COMMON, message);
 
@@ -5697,6 +6106,8 @@ int
 js_throw_type_error(js_env_t *env, const char *code, const char *message) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_TYPE, message);
 
   if (code) {
@@ -5763,6 +6174,8 @@ js_throw_type_errorf(js_env_t *env, const char *code, const char *message, ...) 
 int
 js_throw_range_error(js_env_t *env, const char *code, const char *message) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_RANGE, message);
 
@@ -5831,6 +6244,8 @@ int
 js_throw_syntax_error(js_env_t *env, const char *code, const char *message) {
   if (env->exception) return js__error(env);
 
+  js__enter(env);
+
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_SYNTAX, message);
 
   if (code) {
@@ -5897,6 +6312,8 @@ js_throw_syntax_errorf(js_env_t *env, const char *code, const char *message, ...
 int
 js_throw_reference_error(js_env_t *env, const char *code, const char *message) {
   if (env->exception) return js__error(env);
+
+  js__enter(env);
 
   jerry_value_t error = jerry_error_sz(JERRY_ERROR_REFERENCE, message);
 
@@ -5974,6 +6391,8 @@ int
 js_get_and_clear_last_exception(js_env_t *env, js_value_t **result) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   js_value_t *exception;
 
   if (env->exception) {
@@ -5995,6 +6414,8 @@ int
 js_fatal_exception(js_env_t *env, js_value_t *error) {
   // Allow continuing even with a pending exception
 
+  js__enter(env);
+
   jerry_value_free(env->exception);
 
   env->exception = 0;
@@ -6007,6 +6428,8 @@ js_fatal_exception(js_env_t *env, js_value_t *error) {
 int
 js_terminate_execution(js_env_t *env) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   jerry_value_free(env->exception);
 
@@ -6029,6 +6452,8 @@ js_adjust_external_memory(js_env_t *env, int64_t change_in_bytes, int64_t *resul
 int
 js_request_garbage_collection(js_env_t *env) {
   // Allow continuing even with a pending exception
+
+  js__enter(env);
 
   jerry_heap_gc(JERRY_GC_PRESSURE_LOW);
 
@@ -6057,6 +6482,8 @@ js_disable_garbage_collection_tracking(js_env_t *env, js_garbage_collection_trac
 
 int
 js_get_heap_statistics(js_env_t *env, js_heap_statistics_t *result) {
+  js__enter(env);
+
   int err;
 
   jerry_heap_stats_t stats;
