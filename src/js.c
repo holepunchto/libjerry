@@ -5475,11 +5475,13 @@ js__queue_microtask(js_env_t *env, jerry_value_t function) {
 
 int
 js_queue_microtask(js_env_t *env, js_value_t *function) {
-  if (env->exception) return js__error(env);
+  // Allow continuing even with a pending exception
 
   js__enter(env);
 
   js__queue_microtask(env, js__value_from_abi(function));
+
+  if (env->depth == 0) js__run_microtasks(env);
 
   return 0;
 }
@@ -5519,7 +5521,7 @@ js__on_microtask_call(const jerry_call_info_t *info, const jerry_value_t argv[],
 
 int
 js_queue_microtask_with_callback(js_env_t *env, js_task_cb cb, void *data) {
-  if (env->exception) return js__error(env);
+  // Allow continuing even with a pending exception
 
   js__enter(env);
 
