@@ -22,7 +22,7 @@ fetch_package(
 
 add_library(js OBJECT)
 
-fetch_package("github:holepunchto/libjs" SOURCE_DIR js)
+fetch_package("github:holepunchto/libjs#freeze-seal" SOURCE_DIR js)
 fetch_package("github:holepunchto/libpath")
 fetch_package("github:holepunchto/libintrusive")
 
