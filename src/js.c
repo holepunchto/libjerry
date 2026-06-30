@@ -538,6 +538,8 @@ static inline void
 js__run_microtasks(js_env_t *env) {
   int err;
 
+  env->depth++;
+
   jerry_value_t value;
 
   for (;;) {
@@ -574,6 +576,8 @@ js__run_microtasks(js_env_t *env) {
 
     js__run_microtasks(env);
   }
+
+  env->depth--;
 }
 
 static inline int
