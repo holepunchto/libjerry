@@ -4803,6 +4803,71 @@ js_set_prototype(js_env_t *env, js_value_t *object, js_value_t *prototype) {
   return 0;
 }
 
+static int
+js__set_integrity_level(js_env_t *env, js_value_t *object, const char *method) {
+  if (env->exception) return js__error(env);
+
+  js__enter(env);
+
+  jerry_value_t global = jerry_current_realm();
+
+  jerry_value_t constructor = jerry_object_get_sz(global, "Object");
+
+  jerry_value_free(global);
+
+  if (jerry_value_is_exception(constructor)) {
+    js__uncaught_exception(env, constructor);
+
+    return js__error(env);
+  }
+
+  jerry_value_t function = jerry_object_get_sz(constructor, method);
+
+  jerry_value_free(constructor);
+
+  if (jerry_value_is_exception(function)) {
+    js__uncaught_exception(env, function);
+
+    return js__error(env);
+  }
+
+  jerry_value_t argv[1] = {js__value_from_abi(object)};
+
+  env->depth++;
+
+  jerry_value_t value = jerry_call(function, jerry_undefined(), argv, 1);
+
+  jerry_value_free(function);
+
+  if (env->depth == 1) js__run_microtasks(env);
+
+  env->depth--;
+
+  if (jerry_value_is_exception(value)) {
+    if (env->depth) {
+      env->exception = value;
+    } else {
+      js__uncaught_exception(env, value);
+    }
+
+    return js__error(env);
+  }
+
+  jerry_value_free(value);
+
+  return 0;
+}
+
+int
+js_seal(js_env_t *env, js_value_t *object) {
+  return js__set_integrity_level(env, object, "seal");
+}
+
+int
+js_freeze(js_env_t *env, js_value_t *object) {
+  return js__set_integrity_level(env, object, "freeze");
+}
+
 int
 js_get_property_names(js_env_t *env, js_value_t *object, js_value_t **result) {
   if (env->exception) return js__error(env);
