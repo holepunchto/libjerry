@@ -6,6 +6,8 @@ project(js C)
 
 set(JERRY_EXTERNAL_CONTEXT ON CACHE BOOL "Enable external context support" FORCE)
 set(JERRY_FUNCTION_TO_STRING ON CACHE BOOL "Enable function.toString() support" FORCE)
+set(JERRY_SNAPSHOT_SAVE ON CACHE BOOL "Enable saving snapshots" FORCE)
+set(JERRY_SNAPSHOT_EXEC ON CACHE BOOL "Enable executing snapshots" FORCE)
 set(JERRY_PROMISE_CALLBACK ON CACHE BOOL "Enable promise event callback support" FORCE)
 set(JERRY_ERROR_MESSAGES ON CACHE BOOL "Enable error message support" FORCE)
 set(JERRY_CPOINTER_32_BIT ON CACHE BOOL "Enable 32-bit pointer support" FORCE)
@@ -22,7 +24,7 @@ fetch_package(
 
 add_library(js OBJECT)
 
-fetch_package("github:holepunchto/libjs" SOURCE_DIR js)
+fetch_package("github:holepunchto/libjs#code-cache" SOURCE_DIR js)
 fetch_package("github:holepunchto/libpath")
 fetch_package("github:holepunchto/libintrusive")
 

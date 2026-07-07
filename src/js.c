@@ -171,6 +171,7 @@ struct js_script_s {
   jerry_value_t realm;
   jerry_value_t handle;
   jerry_value_t id;
+  bool snapshot;
 };
 
 struct js_ref_s {
@@ -1210,11 +1211,18 @@ js__parse_script(js_env_t *env, jerry_value_t source, const char *file, size_t l
 
 int
 js_prepare_script(js_env_t *env, const char *file, size_t len, int offset, js_value_t *source, js_script_t **result) {
+  return js_prepare_script_with_code_cache(env, file, len, offset, source, NULL, 0, NULL, result);
+}
+
+int
+js_prepare_script_with_code_cache(js_env_t *env, const char *file, size_t len, int offset, js_value_t *source, const void *cached_data, size_t cached_data_len, bool *cache_rejected, js_script_t **result) {
   if (env->exception) return js__error(env);
 
   js__enter(env);
 
   int err;
+
+  if (cache_rejected) *cache_rejected = false;
 
   if (len == (size_t) -1) len = strlen(file);
 
@@ -1231,26 +1239,65 @@ js_prepare_script(js_env_t *env, const char *file, size_t len, int offset, js_va
   // referrer of any dynamic import().
   jerry_value_t id = jerry_symbol_with_description(source_name);
 
-  jerry_value_free(source_name);
-
   // Retain the source so the script can be parsed again should it later be run
   // in a realm other than the one it is prepared in.
   jerry_value_t script_source = jerry_value_copy(js__value_from_abi(source));
 
-  jerry_value_t parsed = js__parse_script(env, script_source, file, len, offset, id);
+  jerry_value_t handle;
 
-  if (jerry_value_is_exception(parsed)) {
-    jerry_value_free(id);
-    jerry_value_free(script_source);
+  bool snapshot = false;
 
-    if (env->depth) {
-      env->exception = parsed;
+  if (cached_data != NULL) {
+    // Load the compiled bytecode from the snapshot as a function, re-supplying
+    // a fresh [name, id] user value so the identifier re-establishes exactly as
+    // on the non-cached path. The snapshot carries no identifier of its own.
+    jerry_value_t user_value = js__module_user_value(source_name, id);
+
+    jerry_exec_snapshot_option_values_t options = {
+      .source_name = source_name,
+      .user_value = user_value,
+    };
+
+    handle = jerry_exec_snapshot(
+      (const uint32_t *) cached_data,
+      cached_data_len,
+      0,
+      JERRY_SNAPSHOT_EXEC_COPY_DATA | JERRY_SNAPSHOT_EXEC_LOAD_AS_FUNCTION | JERRY_SNAPSHOT_EXEC_HAS_SOURCE_NAME | JERRY_SNAPSHOT_EXEC_HAS_USER_VALUE,
+      &options
+    );
+
+    jerry_value_free(user_value);
+
+    if (jerry_value_is_exception(handle)) {
+      jerry_value_free(handle);
+
+      if (cache_rejected) *cache_rejected = true;
+
+      cached_data = NULL;
     } else {
-      js__uncaught_exception(env, parsed);
+      snapshot = true;
     }
-
-    return js__error(env);
   }
+
+  if (cached_data == NULL) {
+    handle = js__parse_script(env, script_source, file, len, offset, id);
+
+    if (jerry_value_is_exception(handle)) {
+      jerry_value_free(source_name);
+      jerry_value_free(id);
+      jerry_value_free(script_source);
+
+      if (env->depth) {
+        env->exception = handle;
+      } else {
+        js__uncaught_exception(env, handle);
+      }
+
+      return js__error(env);
+    }
+  }
+
+  jerry_value_free(source_name);
 
   js_script_t *script = malloc(sizeof(js_script_t));
 
@@ -1258,8 +1305,9 @@ js_prepare_script(js_env_t *env, const char *file, size_t len, int offset, js_va
   script->offset = offset;
   script->source = script_source;
   script->realm = jerry_current_realm();
-  script->handle = parsed;
+  script->handle = handle;
   script->id = id;
+  script->snapshot = snapshot;
 
   script->name_len = len;
   script->name = malloc(len + 1);
@@ -1268,6 +1316,67 @@ js_prepare_script(js_env_t *env, const char *file, size_t len, int offset, js_va
   memcpy(script->name, file, len);
 
   *result = script;
+
+  return 0;
+}
+
+int
+js_create_script_code_cache(js_env_t *env, js_script_t *script, void **data, size_t *len) {
+  if (env->exception) return js__error(env);
+
+  js__enter(env);
+
+  int err;
+
+  // Size the snapshot buffer generously relative to the source, then grow and
+  // retry on overflow. jerry_generate_snapshot() writes into a caller-provided
+  // buffer and reports "buffer too small" as a RANGE exception; there is no way
+  // to query the required size up front.
+  jerry_size_t source_size = jerry_string_size(script->source, JERRY_ENCODING_UTF8);
+
+  size_t capacity = source_size * 8;
+
+  if (capacity < 4096) capacity = 4096;
+
+  // Round up to a whole number of 32-bit words, as required by the snapshot API.
+  capacity = (capacity + sizeof(uint32_t) - 1) & ~(sizeof(uint32_t) - 1);
+
+  // Cap the growth so a source that genuinely cannot be snapshotted (e.g. one
+  // using tagged template literals) surfaces its error instead of looping.
+  const size_t max_capacity = 256 * 1024 * 1024;
+
+  uint32_t *buffer = malloc(capacity);
+
+  jerry_value_t rc = jerry_generate_snapshot(script->handle, 0, buffer, capacity);
+
+  while (jerry_value_is_exception(rc) && capacity < max_capacity) {
+    jerry_value_free(rc);
+
+    capacity *= 2;
+
+    buffer = realloc(buffer, capacity);
+
+    rc = jerry_generate_snapshot(script->handle, 0, buffer, capacity);
+  }
+
+  if (jerry_value_is_exception(rc)) {
+    free(buffer);
+
+    if (env->depth) {
+      env->exception = rc;
+    } else {
+      js__uncaught_exception(env, rc);
+    }
+
+    return js__error(env);
+  }
+
+  size_t size = (size_t) jerry_value_as_number(rc);
+
+  jerry_value_free(rc);
+
+  *data = realloc(buffer, size);
+  *len = size;
 
   return 0;
 }
@@ -1304,7 +1413,20 @@ js_run_prepared_script(js_env_t *env, js_script_t *script, js_value_t **result) 
 
   env->depth++;
 
-  jerry_value_t value = jerry_run(handle);
+  jerry_value_t value;
+
+  // A cache-backed script is a function that must be called; a parsed script
+  // (including any reparse for a foreign realm) is run. Both execute the script
+  // body against the currently entered realm.
+  if (!reparsed && script->snapshot) {
+    jerry_value_t receiver = jerry_undefined();
+
+    value = jerry_call(handle, receiver, NULL, 0);
+
+    jerry_value_free(receiver);
+  } else {
+    value = jerry_run(handle);
+  }
 
   if (env->depth == 1) js__run_microtasks(env);
 
@@ -1533,6 +1655,23 @@ js_create_module(js_env_t *env, const char *name, size_t len, int offset, js_val
   *result = module;
 
   return 0;
+}
+
+int
+js_create_module_with_code_cache(js_env_t *env, const char *name, size_t len, int offset, js_value_t *source, const void *cached_data, size_t cached_data_len, bool *cache_rejected, js_module_meta_cb cb, void *data, js_module_t **result) {
+  if (cache_rejected) *cache_rejected = cached_data != NULL;
+
+  return js_create_module(env, name, len, offset, source, cb, data, result);
+}
+
+int
+js_create_module_code_cache(js_env_t *env, js_module_t *module, void **data, size_t *len) {
+  int err;
+
+  err = js_throw_error(env, NULL, "Unsupported operation");
+  assert(err == 0);
+
+  return js__error(env);
 }
 
 jerry_value_t
