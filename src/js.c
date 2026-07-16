@@ -2994,12 +2994,19 @@ js_create_function(js_env_t *env, const char *name, size_t len, js_function_cb c
 }
 
 int
-js_create_function_with_source(js_env_t *env, const char *name, size_t name_len, const char *file, size_t file_len, js_value_t *const args[], size_t args_len, int offset, js_value_t *source, js_value_t **result) {
+js_compile_function(js_env_t *env, const char *name, size_t name_len, const char *file, size_t file_len, js_value_t *const args[], size_t args_len, int offset, js_value_t *source, js_value_t **result) {
+  return js_compile_function_with_code_cache(env, name, name_len, file, file_len, args, args_len, offset, source, NULL, 0, NULL, result);
+}
+
+int
+js_compile_function_with_code_cache(js_env_t *env, const char *name, size_t name_len, const char *file, size_t file_len, js_value_t *const args[], size_t args_len, int offset, js_value_t *source, const void *cached_data, size_t cached_data_len, bool *cache_rejected, js_value_t **result) {
   if (env->exception) return js__error(env);
 
   js__enter(env);
 
   int err;
+
+  if (cache_rejected) *cache_rejected = false;
 
   if (file_len == (size_t) -1) file_len = strlen(file);
 
@@ -3010,72 +3017,168 @@ js_create_function_with_source(js_env_t *env, const char *name, size_t name_len,
     return js__error(env);
   }
 
-  size_t buf_len = 0;
-
-  for (int i = 0; i < args_len; i++) {
-    if (i != 0) buf_len += 2;
-
-    buf_len += jerry_string_size(js__value_from_abi(args[i]), JERRY_ENCODING_UTF8);
-  }
-
-  char *buf = malloc(buf_len + 1 /* NULL */);
-
-  size_t j = 0;
-
-  for (int i = 0; i < args_len; i++) {
-    if (i != 0) {
-      buf[j++] = ',';
-      buf[j++] = ' ';
-    }
-
-    j += jerry_string_to_buffer(js__value_from_abi(args[i]), JERRY_ENCODING_UTF8, (uint8_t *) &buf[j], buf_len - j);
-  }
-
-  buf[j] = '\0';
-
   jerry_value_t source_name = jerry_string((const jerry_char_t *) file, file_len, JERRY_ENCODING_UTF8);
 
-  jerry_value_t argument_list = jerry_string_sz(buf);
-
   // Mint a unique identifier for the function and carry it as the user value so
-  // it can be recovered as the referrer of any dynamic import().
+  // it can be recovered as the referrer of any dynamic import(). The identifier
+  // is embedder state, not part of any snapshot, so it is minted afresh on every
+  // load whether or not the compile is served from a cache.
   jerry_value_t id = jerry_symbol_with_description(source_name);
 
   jerry_value_t user_value = js__module_user_value(source_name, id);
 
-  jerry_parse_options_t options = {
-    .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE | JERRY_PARSE_HAS_ARGUMENT_LIST,
-    .source_name = source_name,
-    .start_line = 1,
-    .start_column = offset,
-    .user_value = user_value,
-    .argument_list = argument_list,
-  };
+  jerry_value_t handle;
 
-  free(buf);
+  bool loaded = false;
 
-  jerry_value_t parsed = jerry_parse_value(js__value_from_abi(source), &options);
+  if (cached_data != NULL) {
+    // Load the compiled bytecode from the snapshot as a function, re-supplying
+    // a fresh [name, id] user value so the identifier re-establishes exactly as
+    // on the non-cached path. The argument list is baked into the snapshot.
+    jerry_exec_snapshot_option_values_t snapshot_options = {
+      .source_name = source_name,
+      .user_value = user_value,
+    };
+
+    handle = jerry_exec_snapshot(
+      (const uint32_t *) cached_data,
+      cached_data_len,
+      0,
+      JERRY_SNAPSHOT_EXEC_COPY_DATA | JERRY_SNAPSHOT_EXEC_LOAD_AS_FUNCTION | JERRY_SNAPSHOT_EXEC_HAS_SOURCE_NAME | JERRY_SNAPSHOT_EXEC_HAS_USER_VALUE,
+      &snapshot_options
+    );
+
+    if (jerry_value_is_exception(handle)) {
+      jerry_value_free(handle);
+
+      if (cache_rejected) *cache_rejected = true;
+
+      cached_data = NULL;
+    } else {
+      loaded = true;
+    }
+  }
+
+  if (!loaded) {
+    size_t buf_len = 0;
+
+    for (int i = 0; i < args_len; i++) {
+      if (i != 0) buf_len += 2;
+
+      buf_len += jerry_string_size(js__value_from_abi(args[i]), JERRY_ENCODING_UTF8);
+    }
+
+    char *buf = malloc(buf_len + 1 /* NULL */);
+
+    size_t j = 0;
+
+    for (int i = 0; i < args_len; i++) {
+      if (i != 0) {
+        buf[j++] = ',';
+        buf[j++] = ' ';
+      }
+
+      j += jerry_string_to_buffer(js__value_from_abi(args[i]), JERRY_ENCODING_UTF8, (uint8_t *) &buf[j], buf_len - j);
+    }
+
+    buf[j] = '\0';
+
+    jerry_value_t argument_list = jerry_string_sz(buf);
+
+    jerry_parse_options_t options = {
+      .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE | JERRY_PARSE_HAS_ARGUMENT_LIST,
+      .source_name = source_name,
+      .start_line = 1,
+      .start_column = offset,
+      .user_value = user_value,
+      .argument_list = argument_list,
+    };
+
+    free(buf);
+
+    handle = jerry_parse_value(js__value_from_abi(source), &options);
+
+    jerry_value_free(argument_list);
+  }
 
   jerry_value_free(id);
   jerry_value_free(user_value);
   jerry_value_free(source_name);
-  jerry_value_free(argument_list);
 
-  if (jerry_value_is_exception(parsed)) {
+  if (jerry_value_is_exception(handle)) {
     if (env->depth) {
-      env->exception = parsed;
+      env->exception = handle;
     } else {
-      js__uncaught_exception(env, parsed);
+      js__uncaught_exception(env, handle);
     }
 
     return js__error(env);
   }
 
-  *result = js__value_to_abi(parsed);
+  *result = js__value_to_abi(handle);
 
   js__attach_to_handle_scope(env, env->scope, *result);
 
   return 0;
+}
+
+int
+js_create_function_code_cache(js_env_t *env, js_value_t *function, void **data, size_t *len) {
+  if (env->exception) return js__error(env);
+
+  js__enter(env);
+
+  // Size the snapshot buffer generously, then grow and retry on overflow.
+  // jerry_generate_snapshot() writes into a caller-provided buffer and reports
+  // "buffer too small" as a RANGE exception; there is no way to query the
+  // required size up front. A compiled function is typically small, so start at
+  // a fixed capacity rather than sizing against a source (which is not retained
+  // for functions).
+  size_t capacity = 4096;
+
+  // Cap the growth so a function that genuinely cannot be snapshotted surfaces
+  // its error instead of looping.
+  const size_t max_capacity = 256 * 1024 * 1024;
+
+  uint32_t *buffer = malloc(capacity);
+
+  jerry_value_t rc = jerry_generate_snapshot(js__value_from_abi(function), 0, buffer, capacity);
+
+  while (jerry_value_is_exception(rc) && capacity < max_capacity) {
+    jerry_value_free(rc);
+
+    capacity *= 2;
+
+    buffer = realloc(buffer, capacity);
+
+    rc = jerry_generate_snapshot(js__value_from_abi(function), 0, buffer, capacity);
+  }
+
+  if (jerry_value_is_exception(rc)) {
+    free(buffer);
+
+    if (env->depth) {
+      env->exception = rc;
+    } else {
+      js__uncaught_exception(env, rc);
+    }
+
+    return js__error(env);
+  }
+
+  size_t size = (size_t) jerry_value_as_number(rc);
+
+  jerry_value_free(rc);
+
+  *data = realloc(buffer, size);
+  *len = size;
+
+  return 0;
+}
+
+int
+js_create_function_with_source(js_env_t *env, const char *name, size_t name_len, const char *file, size_t file_len, js_value_t *const args[], size_t args_len, int offset, js_value_t *source, js_value_t **result) {
+  return js_compile_function(env, name, name_len, file, file_len, args, args_len, offset, source, result);
 }
 
 int
