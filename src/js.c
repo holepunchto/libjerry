@@ -4080,12 +4080,34 @@ js_is_boolean(js_env_t *env, js_value_t *value, bool *result) {
 }
 
 int
+js_is_boolean_object(js_env_t *env, js_value_t *value, bool *result) {
+  // Allow continuing even with a pending exception
+
+  js__enter(env);
+
+  *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_BOOLEAN;
+
+  return 0;
+}
+
+int
 js_is_number(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
   js__enter(env);
 
   *result = jerry_value_is_number(js__value_from_abi(value));
+
+  return 0;
+}
+
+int
+js_is_number_object(js_env_t *env, js_value_t *value, bool *result) {
+  // Allow continuing even with a pending exception
+
+  js__enter(env);
+
+  *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_NUMBER;
 
   return 0;
 }
@@ -4136,12 +4158,34 @@ js_is_string(js_env_t *env, js_value_t *value, bool *result) {
 }
 
 int
+js_is_string_object(js_env_t *env, js_value_t *value, bool *result) {
+  // Allow continuing even with a pending exception
+
+  js__enter(env);
+
+  *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_STRING;
+
+  return 0;
+}
+
+int
 js_is_symbol(js_env_t *env, js_value_t *value, bool *result) {
   // Allow continuing even with a pending exception
 
   js__enter(env);
 
   *result = jerry_value_is_symbol(js__value_from_abi(value));
+
+  return 0;
+}
+
+int
+js_is_symbol_object(js_env_t *env, js_value_t *value, bool *result) {
+  // Allow continuing even with a pending exception
+
+  js__enter(env);
+
+  *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_SYMBOL;
 
   return 0;
 }
@@ -4259,6 +4303,17 @@ js_is_bigint(js_env_t *env, js_value_t *value, bool *result) {
   js__enter(env);
 
   *result = jerry_value_is_bigint(js__value_from_abi(value));
+
+  return 0;
+}
+
+int
+js_is_bigint_object(js_env_t *env, js_value_t *value, bool *result) {
+  // Allow continuing even with a pending exception
+
+  js__enter(env);
+
+  *result = jerry_object_type(js__value_from_abi(value)) == JERRY_OBJECT_TYPE_BIGINT;
 
   return 0;
 }
