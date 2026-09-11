@@ -112,6 +112,8 @@ struct js_env_s {
 
   js_promise_rejection_t *promise_rejections;
 
+  intrusive_list_t deferreds;
+
   js_teardown_queue_t teardown_queue;
 
   struct {
@@ -154,6 +156,7 @@ struct js_module_s {
   char *name;
   jerry_value_t handle;
   jerry_value_t id;
+  jerry_value_t user_value;
   js_module_meta_cb meta;
   void *meta_data;
   js_module_resolve_cb resolve;
@@ -171,6 +174,7 @@ struct js_script_s {
   jerry_value_t realm;
   jerry_value_t handle;
   jerry_value_t id;
+  jerry_value_t user_value;
   bool snapshot;
 };
 
@@ -183,6 +187,7 @@ struct js_ref_s {
 
 struct js_deferred_s {
   jerry_value_t promise;
+  intrusive_list_node_t list;
 };
 
 struct js_string_view_s {
@@ -745,6 +750,16 @@ static void
 js__close_env(js_env_t *env) {
   js__enter(env);
 
+  intrusive_list_for_each(next, &env->deferreds) {
+    js_deferred_t *deferred = intrusive_entry(next, js_deferred_t, list);
+
+    intrusive_list_remove(&env->deferreds, &deferred->list);
+
+    jerry_value_free(deferred->promise);
+
+    free(deferred);
+  }
+
   jerry_value_free(env->realm);
   jerry_value_free(env->bindings);
   jerry_value_free(env->exception);
@@ -821,6 +836,7 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
 
   env->promise_rejections = NULL;
 
+  intrusive_list_init(&env->deferreds);
   intrusive_list_init(&env->teardown_queue.tasks);
 
   env->callbacks.uncaught_exception = NULL;
@@ -1092,6 +1108,23 @@ js__default_module_id(js_env_t *env) {
   return env->default_module_id;
 }
 
+typedef struct {
+  js_dynamic_import_cb cb;
+  void *data;
+} js_dynamic_import_handler_t;
+
+static void
+js__on_dynamic_import_handler_finalize(void *data, struct jerry_object_native_info_t *info) {
+  free(data);
+}
+
+// A handler registered for a single unit, recorded as a native pointer on the
+// user value the unit carries. The user value is reachable from the unit and
+// from nowhere else, so the handler lives exactly as long as the unit does.
+static const jerry_object_native_info_t js__dynamic_import_handler = {
+  .free_cb = js__on_dynamic_import_handler_finalize,
+};
+
 // Builds the value associated with a compilation unit and handed back as the
 // referrer of any dynamic import() it initiates. JerryScript only carries a
 // single user value per unit, so we pack both the referrer name and its
@@ -1104,6 +1137,91 @@ js__module_user_value(jerry_value_t name, jerry_value_t id) {
   jerry_value_free(jerry_object_set_index(user_value, 1, id));
 
   return user_value;
+}
+
+static int
+js__on_dynamic_import(js_env_t *env, jerry_value_t user_value, js_dynamic_import_cb cb, void *data, const char *unsupported) {
+  int err;
+
+  // Only a unit parsed by this library carries a user value to record against,
+  // and only one with an identifier of its own can be told apart from the rest.
+  // Scripts run with `js_run_script()` share the default identifier, so a
+  // handler recorded against one would answer for more than it was meant to.
+
+  if (!jerry_value_is_array(user_value) || jerry_array_length(user_value) != 2) {
+    err = js_throw_error(env, NULL, unsupported);
+    assert(err == 0);
+
+    return js__error(env);
+  }
+
+  jerry_value_t id = jerry_object_get_index(user_value, 1);
+
+  bool shared = jerry_value_is_true(jerry_binary_op(JERRY_BIN_OP_STRICT_EQUAL, id, js__default_module_id(env)));
+
+  jerry_value_free(id);
+
+  if (shared) {
+    err = js_throw_error(env, NULL, unsupported);
+    assert(err == 0);
+
+    return js__error(env);
+  }
+
+  // A handler is write-once, so that a unit cannot be taken over by whoever
+  // reaches it second.
+
+  if (jerry_object_get_native_ptr(user_value, &js__dynamic_import_handler) != NULL) {
+    err = js_throw_error(env, NULL, "Dynamic import handler has already been registered");
+    assert(err == 0);
+
+    return js__error(env);
+  }
+
+  js_dynamic_import_handler_t *handler = malloc(sizeof(js_dynamic_import_handler_t));
+
+  handler->cb = cb;
+  handler->data = data;
+
+  jerry_object_set_native_ptr(user_value, &js__dynamic_import_handler, handler);
+
+  return 0;
+}
+
+int
+js_on_script_dynamic_import(js_env_t *env, js_script_t *script, js_dynamic_import_cb cb, void *data) {
+  if (env->exception) return js__error(env);
+
+  js__enter(env);
+
+  return js__on_dynamic_import(env, script->user_value, cb, data, "Cannot register a dynamic import handler for a script without source");
+}
+
+int
+js_on_module_dynamic_import(js_env_t *env, js_module_t *module, js_dynamic_import_cb cb, void *data) {
+  if (env->exception) return js__error(env);
+
+  js__enter(env);
+
+  // Synthetic modules have no source and so can never be the referrer of a
+  // dynamic import().
+
+  return js__on_dynamic_import(env, module->user_value, cb, data, "Cannot register a dynamic import handler for a synthetic module");
+}
+
+int
+js_on_function_dynamic_import(js_env_t *env, js_value_t *function, js_dynamic_import_cb cb, void *data) {
+  if (env->exception) return js__error(env);
+
+  js__enter(env);
+
+  jerry_value_t user_value = jerry_source_user_value(js__value_from_abi(function));
+
+  int err = js__on_dynamic_import(env, user_value, cb, data, "Cannot register a dynamic import handler for a function without source");
+
+  jerry_value_free(user_value);
+
+  return err;
 }
 
 int
@@ -1188,10 +1306,8 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
 // bytecode, so the parse must be repeated whenever the script is run in a
 // realm other than the one it was prepared in.
 static jerry_value_t
-js__parse_script(js_env_t *env, jerry_value_t source, const char *file, size_t len, int offset, jerry_value_t id) {
+js__parse_script(js_env_t *env, jerry_value_t source, const char *file, size_t len, int offset, jerry_value_t user_value) {
   jerry_value_t source_name = jerry_string((const jerry_char_t *) file, len, JERRY_ENCODING_UTF8);
-
-  jerry_value_t user_value = js__module_user_value(source_name, id);
 
   jerry_parse_options_t options = {
     .options = JERRY_PARSE_HAS_SOURCE_NAME | JERRY_PARSE_HAS_START | JERRY_PARSE_HAS_USER_VALUE,
@@ -1203,7 +1319,6 @@ js__parse_script(js_env_t *env, jerry_value_t source, const char *file, size_t l
 
   jerry_value_t parsed = jerry_parse_value(source, &options);
 
-  jerry_value_free(user_value);
   jerry_value_free(source_name);
 
   return parsed;
@@ -1240,19 +1355,19 @@ js_prepare_script_with_code_cache(js_env_t *env, const char *file, size_t len, i
   jerry_value_t id = jerry_symbol_with_description(source_name);
 
   // Retain the source so the script can be parsed again should it later be run
-  // in a realm other than the one it is prepared in.
+  // in a realm other than the one it is prepared in, along with the user value
+  // it is parsed with, so that a handler recorded against it survives.
   jerry_value_t script_source = jerry_value_copy(js__value_from_abi(source));
+
+  jerry_value_t user_value = js__module_user_value(source_name, id);
 
   jerry_value_t handle;
 
   bool snapshot = false;
 
   if (cached_data != NULL) {
-    // Load the compiled bytecode from the snapshot as a function, re-supplying
-    // a fresh [name, id] user value so the identifier re-establishes exactly as
-    // on the non-cached path. The snapshot carries no identifier of its own.
-    jerry_value_t user_value = js__module_user_value(source_name, id);
-
+    // Reuse the [name, id] user value so the identifier re-establishes exactly
+    // as on the non-cached path. The snapshot carries no identifier of its own.
     jerry_exec_snapshot_option_values_t options = {
       .source_name = source_name,
       .user_value = user_value,
@@ -1266,8 +1381,6 @@ js_prepare_script_with_code_cache(js_env_t *env, const char *file, size_t len, i
       &options
     );
 
-    jerry_value_free(user_value);
-
     if (jerry_value_is_exception(handle)) {
       jerry_value_free(handle);
 
@@ -1280,11 +1393,12 @@ js_prepare_script_with_code_cache(js_env_t *env, const char *file, size_t len, i
   }
 
   if (cached_data == NULL) {
-    handle = js__parse_script(env, script_source, file, len, offset, id);
+    handle = js__parse_script(env, script_source, file, len, offset, user_value);
 
     if (jerry_value_is_exception(handle)) {
       jerry_value_free(source_name);
       jerry_value_free(id);
+      jerry_value_free(user_value);
       jerry_value_free(script_source);
 
       if (env->depth) {
@@ -1307,6 +1421,7 @@ js_prepare_script_with_code_cache(js_env_t *env, const char *file, size_t len, i
   script->realm = jerry_current_realm();
   script->handle = handle;
   script->id = id;
+  script->user_value = user_value;
   script->snapshot = snapshot;
 
   script->name_len = len;
@@ -1396,7 +1511,7 @@ js_run_prepared_script(js_env_t *env, js_script_t *script, js_value_t **result) 
 
   jerry_value_t handle =
     reparsed
-      ? js__parse_script(env, script->source, script->name, script->name_len, script->offset, script->id)
+      ? js__parse_script(env, script->source, script->name, script->name_len, script->offset, script->user_value)
       : script->handle;
 
   jerry_value_free(realm);
@@ -1464,6 +1579,7 @@ js_delete_script(js_env_t *env, js_script_t *script) {
   jerry_value_free(script->source);
   jerry_value_free(script->realm);
   jerry_value_free(script->id);
+  jerry_value_free(script->user_value);
 
   free(script->name);
   free(script);
@@ -1525,25 +1641,43 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t user_val
 
   js_env_t *env = opaque;
 
-  if (env->callbacks.dynamic_import == NULL) {
-    return jerry_throw_sz(JERRY_ERROR_COMMON, "Dynamic import() is not supported");
-  }
-
   jerry_value_t assertions = jerry_null();
 
-  // Recover the referrer name and identifier carried by the user value. Units
+  // Recover the referrer name and identifier carried by the user value, along
+  // with the handler registered for the unit if it has one of its own. Units
   // compiled by this library always carry a two-element array, but fall back
   // gracefully should the user value originate elsewhere.
 
   jerry_value_t referrer;
   jerry_value_t id;
 
+  js_dynamic_import_cb cb = env->callbacks.dynamic_import;
+  void *cb_data = env->callbacks.dynamic_import_data;
+
   if (jerry_value_is_array(user_value) && jerry_array_length(user_value) == 2) {
     referrer = jerry_object_get_index(user_value, 0);
     id = jerry_object_get_index(user_value, 1);
+
+    js_dynamic_import_handler_t *handler = jerry_object_get_native_ptr(user_value, &js__dynamic_import_handler);
+
+    if (handler != NULL) {
+      cb = handler->cb;
+      cb_data = handler->data;
+    }
   } else {
     referrer = jerry_value_copy(user_value);
     id = jerry_value_copy(js__default_module_id(env));
+  }
+
+  // A unit with a handler of its own may import even when the environment has
+  // none, which is the point of registering one.
+
+  if (cb == NULL) {
+    jerry_value_free(referrer);
+    jerry_value_free(id);
+    jerry_value_free(assertions);
+
+    return jerry_throw_sz(JERRY_ERROR_COMMON, "Dynamic import() is not supported");
   }
 
   js_env_scope_t previous = js__enter(env);
@@ -1552,13 +1686,13 @@ js__on_module_import(const jerry_value_t specifier, const jerry_value_t user_val
   err = js_open_handle_scope(env, &scope);
   assert(err == 0);
 
-  js_value_t *module = env->callbacks.dynamic_import(
+  js_value_t *module = cb(
     env,
     js__value_to_abi(specifier),
     js__value_to_abi(assertions),
     js__value_to_abi(referrer),
     js__value_to_abi(id),
-    env->callbacks.dynamic_import_data
+    cb_data
   );
 
   jerry_value_t value;
@@ -1618,11 +1752,11 @@ js_create_module(js_env_t *env, const char *name, size_t len, int offset, js_val
 
   jerry_value_t handle = jerry_parse_value(js__value_from_abi(source), &options);
 
-  jerry_value_free(user_value);
   jerry_value_free(source_name);
 
   if (jerry_value_is_exception(handle)) {
     jerry_value_free(id);
+    jerry_value_free(user_value);
 
     if (env->depth) {
       env->exception = handle;
@@ -1640,8 +1774,13 @@ js_create_module(js_env_t *env, const char *name, size_t len, int offset, js_val
   module->env = env;
   module->handle = handle;
   module->id = id;
+  module->user_value = user_value;
   module->meta = cb;
   module->meta_data = data;
+  module->resolve = NULL;
+  module->resolve_data = NULL;
+  module->evaluate = NULL;
+  module->evaluate_data = NULL;
 
   if (len == (size_t) -1) {
     module->name = strdup(name);
@@ -1737,6 +1876,11 @@ js_create_synthetic_module(js_env_t *env, const char *name, size_t len, js_value
   module->env = env;
   module->handle = handle;
   module->id = id;
+  module->user_value = jerry_undefined();
+  module->meta = NULL;
+  module->meta_data = NULL;
+  module->resolve = NULL;
+  module->resolve_data = NULL;
   module->evaluate = cb;
   module->evaluate_data = data;
 
@@ -1762,6 +1906,7 @@ js_delete_module(js_env_t *env, js_module_t *module) {
 
   jerry_value_free(module->handle);
   jerry_value_free(module->id);
+  jerry_value_free(module->user_value);
 
   free(module->name);
   free(module);
@@ -1806,9 +1951,18 @@ js_get_default_module_id(js_env_t *env, js_value_t **result) {
 
 int
 js_get_module_namespace(js_env_t *env, js_module_t *module, js_value_t **result) {
-  // Allow continuing even with a pending exception
+  if (env->exception) return js__error(env);
 
   js__enter(env);
+
+  int err;
+
+  if (jerry_module_state(module->handle) < JERRY_MODULE_STATE_LINKED) {
+    err = js_throw_error(env, NULL, "Cannot get the namespace of an uninstantiated module");
+    assert(err == 0);
+
+    return js__error(env);
+  }
 
   *result = js__value_to_abi(jerry_module_namespace(module->handle));
 
@@ -1890,6 +2044,17 @@ js_instantiate_module(js_env_t *env, js_module_t *module, js_module_resolve_cb c
 
   js__enter(env);
 
+  int err;
+
+  jerry_module_state_t state = jerry_module_state(module->handle);
+
+  if (state == JERRY_MODULE_STATE_LINKING || state == JERRY_MODULE_STATE_EVALUATING) {
+    err = js_throw_error(env, NULL, "Cannot instantiate a module that is already being instantiated or evaluated");
+    assert(err == 0);
+
+    return js__error(env);
+  }
+
   module->resolve = cb;
   module->resolve_data = data;
 
@@ -1922,37 +2087,81 @@ js_run_module(js_env_t *env, js_module_t *module, js_value_t **result) {
 
   js__enter(env);
 
-  env->depth++;
+  int err;
 
-  jerry_value_t value = jerry_module_evaluate(module->handle);
+  jerry_module_state_t state = jerry_module_state(module->handle);
 
-  jerry_value_t promise = jerry_promise();
+  if (state != JERRY_MODULE_STATE_LINKED && state != JERRY_MODULE_STATE_EVALUATED && state != JERRY_MODULE_STATE_ERROR) {
+    err = js_throw_error(env, NULL, state == JERRY_MODULE_STATE_EVALUATING ? "Cannot run a module that is already evaluating" : "Cannot run an uninstantiated module");
+    assert(err == 0);
 
-  if (jerry_value_is_exception(value)) {
-    value = jerry_exception_value(value, true);
-
-    jerry_value_free(jerry_promise_reject(promise, value));
-  } else if (env->exception) {
-    jerry_value_free(value);
-
-    value = jerry_exception_value(env->exception, true);
-
-    env->exception = 0;
-
-    jerry_value_free(jerry_promise_reject(promise, value));
-  } else {
-    jerry_value_free(jerry_promise_resolve(promise, value));
+    return js__error(env);
   }
 
-  jerry_value_free(value);
+  env->depth++;
+
+  jerry_value_t value;
+
+  bool aborted = false;
+
+  if (state == JERRY_MODULE_STATE_EVALUATED) {
+    // The engine hands back the result of an evaluation once only, so a module
+    // that has already run is not run again.
+    value = jerry_undefined();
+  } else {
+    value = jerry_module_evaluate(module->handle);
+
+    // An exception from the evaluate callback of a synthetic module aborts the
+    // evaluation, which then fails rather than handing back a promise for
+    // something that never ran. A module that already errored keeps the
+    // rejection it earned then.
+    aborted = state == JERRY_MODULE_STATE_LINKED && module->evaluate && jerry_value_is_exception(value);
+  }
+
+  jerry_value_t promise = 0;
+
+  if (!aborted) {
+    promise = jerry_promise();
+
+    if (jerry_value_is_exception(value)) {
+      value = jerry_exception_value(value, true);
+
+      jerry_value_free(jerry_promise_reject(promise, value));
+    } else if (env->exception) {
+      jerry_value_free(value);
+
+      value = jerry_exception_value(env->exception, true);
+
+      env->exception = 0;
+
+      jerry_value_free(jerry_promise_reject(promise, value));
+    } else {
+      jerry_value_free(jerry_promise_resolve(promise, value));
+    }
+
+    jerry_value_free(value);
+  }
 
   if (env->depth == 1) js__run_microtasks(env);
 
   env->depth--;
 
-  *result = js__value_to_abi(promise);
+  if (aborted) {
+    if (env->depth) {
+      env->exception = value;
+    } else {
+      js__uncaught_exception(env, value);
+    }
 
-  js__attach_to_handle_scope(env, env->scope, *result);
+    return js__error(env);
+  }
+
+  if (result == NULL) jerry_value_free(promise);
+  else {
+    *result = js__value_to_abi(promise);
+
+    js__attach_to_handle_scope(env, env->scope, *result);
+  }
 
   return 0;
 }
@@ -2274,6 +2483,15 @@ js_wrap(js_env_t *env, js_value_t *object, void *data, js_finalize_cb finalize_c
 
   js__enter(env);
 
+  int err;
+
+  if (jerry_object_has_native_ptr(js__value_from_abi(object), &js__wrap)) {
+    err = js_throw_errorf(env, NULL, "Object is already wrapped");
+    assert(err == 0);
+
+    return js__error(env);
+  }
+
   js_finalizer_t *finalizer = malloc(sizeof(js_finalizer_t));
 
   finalizer->env = env;
@@ -2294,7 +2512,16 @@ js_unwrap(js_env_t *env, js_value_t *object, void **result) {
 
   js__enter(env);
 
+  int err;
+
   js_finalizer_t *finalizer = jerry_object_get_native_ptr(js__value_from_abi(object), &js__wrap);
+
+  if (finalizer == NULL) {
+    err = js_throw_type_error(env, NULL, "Object is not wrapped");
+    assert(err == 0);
+
+    return js__error(env);
+  }
 
   *result = finalizer->data;
 
@@ -2307,7 +2534,16 @@ js_remove_wrap(js_env_t *env, js_value_t *object, void **result) {
 
   js__enter(env);
 
+  int err;
+
   js_finalizer_t *finalizer = jerry_object_get_native_ptr(js__value_from_abi(object), &js__wrap);
+
+  if (finalizer == NULL) {
+    err = js_throw_type_error(env, NULL, "Object is not wrapped");
+    assert(err == 0);
+
+    return js__error(env);
+  }
 
   jerry_object_delete_native_ptr(js__value_from_abi(object), &js__wrap);
 
@@ -2702,11 +2938,29 @@ js_create_bigint_words(js_env_t *env, int sign, const uint64_t *words, size_t le
   return 0;
 }
 
+// The engine cannot represent a string longer than `js_platform_limits_t` gives
+// for `string_length`, so an out-of-range length is refused before any of the
+// text behind it is read.
+static inline int
+js__check_string_length(js_env_t *env, size_t len) {
+  int err;
+
+  if (len == (size_t) -1 || len <= INT32_MAX) return 0;
+
+  err = js_throw_range_error(env, NULL, "Invalid string length");
+  assert(err == 0);
+
+  return js__error(env);
+}
+
 int
 js_create_string_utf8(js_env_t *env, const utf8_t *str, size_t len, js_value_t **result) {
   js__enter(env);
 
   int err;
+
+  err = js__check_string_length(env, len);
+  if (err < 0) return err;
 
   if (len == (size_t) -1) len = strlen((const char *) str);
 
@@ -2731,6 +2985,9 @@ js_create_string_utf16le(js_env_t *env, const utf16_t *str, size_t len, js_value
   js__enter(env);
 
   int err;
+
+  err = js__check_string_length(env, len);
+  if (err < 0) return err;
 
   if (len == (size_t) -1) len = wcslen((wchar_t *) str);
 
@@ -2763,6 +3020,9 @@ js_create_string_latin1(js_env_t *env, const latin1_t *str, size_t len, js_value
   js__enter(env);
 
   int err;
+
+  err = js__check_string_length(env, len);
+  if (err < 0) return err;
 
   if (len == (size_t) -1) len = strlen((char *) str);
 
@@ -3115,6 +3375,25 @@ js_compile_function_with_code_cache(js_env_t *env, const char *name, size_t name
     return js__error(env);
   }
 
+  jerry_value_t length = jerry_object_get_sz(handle, "length");
+
+  // An argument name that is not an identifier can still parse as part of the
+  // argument list, an empty name and one smuggling several arguments among
+  // them, and the engine takes those without a word. Either way the function
+  // ends up with a different arity than it was asked for.
+  bool arity = jerry_value_as_number(length) == (double) args_len;
+
+  jerry_value_free(length);
+
+  if (!arity) {
+    jerry_value_free(handle);
+
+    err = js_throw_errorf(env, NULL, "Could not compile function");
+    assert(err == 0);
+
+    return js__error(env);
+  }
+
   *result = js__value_to_abi(handle);
 
   js__attach_to_handle_scope(env, env->scope, *result);
@@ -3236,6 +3515,25 @@ js_create_array_with_length(js_env_t *env, size_t len, js_value_t **result) {
   js__enter(env);
 
   *result = js__value_to_abi(jerry_array(len));
+
+  js__attach_to_handle_scope(env, env->scope, *result);
+
+  return 0;
+}
+
+int
+js_create_array_with_elements(js_env_t *env, js_value_t *const elements[], size_t element_count, js_value_t **result) {
+  // Allow continuing even with a pending exception
+
+  js__enter(env);
+
+  jerry_value_t array = jerry_array(element_count);
+
+  for (size_t i = 0; i < element_count; i++) {
+    jerry_value_free(jerry_object_set_index(array, i, js__value_from_abi(elements[i])));
+  }
+
+  *result = js__value_to_abi(array);
 
   js__attach_to_handle_scope(env, env->scope, *result);
 
@@ -3489,6 +3787,10 @@ js_create_promise(js_env_t *env, js_deferred_t **deferred, js_value_t **promise)
 
   result->promise = jerry_promise();
 
+  // A deferred that is never settled still holds the promise it would have
+  // settled, which the environment gives back on teardown.
+  intrusive_list_prepend(&env->deferreds, &result->list);
+
   *deferred = result;
 
   *promise = js__value_to_abi(result->promise);
@@ -3503,6 +3805,8 @@ js_resolve_deferred(js_env_t *env, js_deferred_t *deferred, js_value_t *resoluti
   js__enter(env);
 
   jerry_value_free(jerry_promise_resolve(deferred->promise, js__value_from_abi(resolution)));
+
+  intrusive_list_remove(&env->deferreds, &deferred->list);
 
   jerry_value_free(deferred->promise);
 
@@ -3520,6 +3824,8 @@ js_reject_deferred(js_env_t *env, js_deferred_t *deferred, js_value_t *resolutio
   js__enter(env);
 
   jerry_value_free(jerry_promise_reject(deferred->promise, js__value_from_abi(resolution)));
+
+  intrusive_list_remove(&env->deferreds, &deferred->list);
 
   jerry_value_free(deferred->promise);
 
@@ -4653,6 +4959,59 @@ js_is_module_namespace(js_env_t *env, js_value_t *value, bool *result) {
 }
 
 int
+js_get_object_type(js_env_t *env, js_value_t *value, js_object_type_t *result) {
+  // Allow continuing even with a pending exception
+
+  int err;
+
+  bool is;
+
+  // Classify by way of the individual predicates, in the order of precedence
+  // documented for `js_object_type_t`, so that the two cannot drift apart. The
+  // saving is in classifying with a single call, not in the predicates
+  // themselves, which are all cheap.
+#define V(type, predicate) \
+  err = predicate(env, value, &is); \
+  assert(err == 0); \
+  if (is) { \
+    *result = type; \
+    return 0; \
+  }
+
+  V(js_array, js_is_array)
+  V(js_arguments, js_is_arguments)
+  V(js_date, js_is_date)
+  V(js_regexp, js_is_regexp)
+  V(js_error, js_is_error)
+  V(js_promise, js_is_promise)
+  V(js_proxy, js_is_proxy)
+  V(js_generator, js_is_generator)
+  V(js_map, js_is_map)
+  V(js_set, js_is_set)
+  V(js_map_iterator, js_is_map_iterator)
+  V(js_set_iterator, js_is_set_iterator)
+  V(js_weak_map, js_is_weak_map)
+  V(js_weak_set, js_is_weak_set)
+  V(js_weak_ref, js_is_weak_ref)
+  V(js_arraybuffer, js_is_arraybuffer)
+  V(js_sharedarraybuffer, js_is_sharedarraybuffer)
+  V(js_typedarray, js_is_typedarray)
+  V(js_dataview, js_is_dataview)
+  V(js_module_namespace, js_is_module_namespace)
+  V(js_boolean_object, js_is_boolean_object)
+  V(js_number_object, js_is_number_object)
+  V(js_string_object, js_is_string_object)
+  V(js_symbol_object, js_is_symbol_object)
+  V(js_bigint_object, js_is_bigint_object)
+  V((js_object_type_t) js_external, js_is_external)
+#undef V
+
+  *result = (js_object_type_t) js_object;
+
+  return 0;
+}
+
+int
 js_strict_equals(js_env_t *env, js_value_t *a, js_value_t *b, bool *result) {
   // Allow continuing even with a pending exception
 
@@ -4758,7 +5117,14 @@ js_get_value_int64(js_env_t *env, js_value_t *value, int64_t *result) {
 
   js__enter(env);
 
-  *result = (int64_t) jerry_value_as_number(js__value_from_abi(value));
+  double number = jerry_value_as_number(js__value_from_abi(value));
+
+  // A cast leaves anything out of range undefined, so the number is narrowed
+  // here instead.
+  if (!isfinite(number)) *result = 0;
+  else if (number <= (double) INT64_MIN) *result = INT64_MIN;
+  else if (number >= (double) INT64_MAX) *result = INT64_MAX;
+  else *result = (int64_t) number;
 
   return 0;
 }
@@ -5026,7 +5392,7 @@ js_get_array_elements(js_env_t *env, js_value_t *array, js_value_t **elements, s
 }
 
 int
-js_set_array_elements(js_env_t *env, js_value_t *array, const js_value_t *elements[], size_t len, size_t offset) {
+js_set_array_elements(js_env_t *env, js_value_t *array, js_value_t *const elements[], size_t len, size_t offset) {
   if (env->exception) return js__error(env);
 
   js__enter(env);
