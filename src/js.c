@@ -419,14 +419,20 @@ js__exit(js_env_scope_t previous) {
   jerry_context_size = previous.context_size;
 }
 
+// JerryScript encodes the integer 0 as a zero value, so values are offset by
+// one to keep it from being mistaken for `NULL`, which in turn stands in for
+// `undefined` wherever a value is optional.
+
 static inline jerry_value_t
 js__value_from_abi(const js_value_t *value) {
-  return (jerry_value_t) (uintptr_t) value;
+  if (value == NULL) return jerry_undefined();
+
+  return (jerry_value_t) ((uintptr_t) value - 1);
 }
 
 static inline js_value_t *
 js__value_to_abi(jerry_value_t value) {
-  return (js_value_t *) (uintptr_t) value;
+  return (js_value_t *) ((uintptr_t) value + 1);
 }
 
 static const char *js__platform_identifier = "jerryscript";
@@ -705,36 +711,19 @@ js__on_module_import_meta(const jerry_value_t handle, const jerry_value_t meta, 
 static jerry_value_t
 js__on_module_import(const jerry_value_t specifier, const jerry_value_t user_value, void *opaque);
 
-static inline void
-js__check_liveness(js_env_t *env);
-
 static void
 js__on_prepare(uv_prepare_t *handle) {
-  js_env_t *env = (js_env_t *) handle->data;
-
-  js__check_liveness(env);
+  // Nothing is queued on the loop's behalf, so there is nothing to run before
+  // it blocks.
 }
 
 static void
 js__on_check(uv_check_t *handle) {
-  js_env_t *env = (js_env_t *) handle->data;
-
-  if (uv_loop_alive(env->loop)) return;
-
-  js__check_liveness(env);
-}
-
-static inline void
-js__check_liveness(js_env_t *env) {
-  int err;
-
-  if (true /* macrotask queue empty */) {
-    err = uv_prepare_stop(&env->prepare);
-  } else {
-    err = uv_prepare_start(&env->prepare, js__on_prepare);
-  }
-
-  assert(err == 0);
+  // Nothing is queued on the loop's behalf, so there is nothing to settle once
+  // it has polled. Were a macrotask queue ever added, its liveness would have
+  // to be held as work is queued rather than settled from here: the loop runs
+  // timers after the check phase, so what their callbacks queue cannot be
+  // observed from a check callback.
 }
 
 static void
@@ -747,8 +736,13 @@ js__on_handle_close(uv_handle_t *handle) {
 }
 
 static void
+js__finalize_objects(js_env_t *env);
+
+static void
 js__close_env(js_env_t *env) {
   js__enter(env);
+
+  js__finalize_objects(env);
 
   intrusive_list_for_each(next, &env->deferreds) {
     js_deferred_t *deferred = intrusive_entry(next, js_deferred_t, list);
@@ -858,6 +852,10 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
 
   env->prepare.data = (void *) env;
 
+  // Neither handle should keep the loop alive; there is nothing queued on the
+  // loop's behalf for them to hold it open for.
+  uv_unref((uv_handle_t *) &env->prepare);
+
   err = uv_check_init(loop, &env->check);
   assert(err == 0);
 
@@ -866,9 +864,6 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
 
   env->check.data = (void *) env;
 
-  // The check handle should not on its own keep the loop alive; it's simply
-  // used for running any outstanding tasks that might cause additional work
-  // to be queued.
   uv_unref((uv_handle_t *) &env->check);
 
   err = uv_async_init(loop, &env->teardown, js__on_teardown);
@@ -2642,13 +2637,7 @@ js__on_delegate_delete_property(js_env_t *env, js_callback_info_t *info) {
 
   bool success = delegate->callbacks.delete_property(env, argv[1], delegate->data);
 
-  if (env->exception) {
-    jerry_value_free(env->exception);
-
-    env->exception = 0;
-
-    success = false;
-  };
+  if (env->exception) return NULL;
 
   js_value_t *result;
   err = js_get_boolean(env, success, &result);
@@ -3552,6 +3541,63 @@ js__on_external_finalize(void *data, jerry_object_native_info_t *info) {
 static const jerry_object_native_info_t js__external = {
   .free_cb = js__on_external_finalize,
 };
+
+typedef struct {
+  jerry_value_t *objects;
+  size_t len;
+  size_t capacity;
+} js_finalizable_objects_t;
+
+static bool
+js__collect_finalizable_object(const jerry_value_t object, void *data, void *opaque) {
+  js_finalizable_objects_t *objects = opaque;
+
+  if (objects->len == objects->capacity) {
+    objects->capacity = objects->capacity ? objects->capacity * 2 : 16;
+    objects->objects = realloc(objects->objects, objects->capacity * sizeof(jerry_value_t));
+  }
+
+  objects->objects[objects->len++] = jerry_value_copy(object);
+
+  return true;
+}
+
+// Invokes the finalize callbacks of the objects that are still alive as the
+// environment is destroyed, while the engine can still service them. Clearing
+// each native pointer first keeps `jerry_cleanup()` from invoking them again.
+static void
+js__finalize_objects(js_env_t *env) {
+  static const jerry_object_native_info_t *infos[] = {
+    &js__wrap,
+    &js__delegate,
+    &js__finalizer,
+    &js__external,
+  };
+
+  for (size_t i = 0; i < sizeof(infos) / sizeof(infos[0]); i++) {
+    const jerry_object_native_info_t *info = infos[i];
+
+    js_finalizable_objects_t objects = {NULL, 0, 0};
+
+    jerry_foreach_live_object_with_info(info, js__collect_finalizable_object, &objects);
+
+    for (size_t j = 0; j < objects.len; j++) {
+      jerry_value_t object = objects.objects[j];
+
+      void *data = jerry_object_get_native_ptr(object, info);
+
+      if (data) {
+        jerry_object_delete_native_ptr(object, info);
+
+        info->free_cb(data, (jerry_object_native_info_t *) info);
+      }
+
+      jerry_value_free(object);
+    }
+
+    free(objects.objects);
+  }
+}
 
 int
 js_create_external(js_env_t *env, void *data, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {

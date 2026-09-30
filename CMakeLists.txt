@@ -20,6 +20,7 @@ fetch_package(
     patches/02-remove-archive-variables.patch
     patches/03-fix-unterminated-string-initialization.patch
     patches/04-support-symbols-as-weak-keys.patch
+    patches/05-propagate-exceptions-from-delete.patch
 )
 
 add_library(js OBJECT)

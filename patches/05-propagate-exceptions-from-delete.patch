@@ -1,0 +1,35 @@
+diff --git a/jerry-core/api/jerryscript.c b/jerry-core/api/jerryscript.c
+index e1b453c..248f1c5 100644
+--- a/jerry-core/api/jerryscript.c
++++ b/jerry-core/api/jerryscript.c
+@@ -3222,10 +3222,11 @@ jerry_object_delete (jerry_value_t object, /**< object value */
+ 
+   if (!ecma_is_value_object (object) || !ecma_is_value_prop_name (key))
+   {
+-    return false;
++    return ECMA_VALUE_FALSE;
+   }
+ 
+-  return ecma_op_object_delete (ecma_get_object_from_value (object), ecma_get_prop_name_from_value (key), false);
++  return jerry_return (
++    ecma_op_object_delete (ecma_get_object_from_value (object), ecma_get_prop_name_from_value (key), false));
+ } /* jerry_object_delete */
+ 
+ /**
+@@ -3261,14 +3262,14 @@ jerry_object_delete_index (jerry_value_t object, /**< object value */
+ 
+   if (!ecma_is_value_object (object))
+   {
+-    return false;
++    return ECMA_VALUE_FALSE;
+   }
+ 
+   ecma_string_t *str_idx_p = ecma_new_ecma_string_from_uint32 (index);
+   ecma_value_t ret_value = ecma_op_object_delete (ecma_get_object_from_value (object), str_idx_p, false);
+   ecma_deref_ecma_string (str_idx_p);
+ 
+-  return ret_value;
++  return jerry_return (ret_value);
+ } /* jerry_object_delete_index */
+ 
+ /**
