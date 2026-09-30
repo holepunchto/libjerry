@@ -235,10 +235,12 @@ struct js_arraybuffer_header_s {
 };
 
 struct js_arraybuffer_backing_store_s {
-  jerry_value_t owner;
   atomic_int references;
   jerry_length_t len;
   uint8_t *data;
+  bool external;
+  js_finalize_cb finalize_cb;
+  void *finalize_hint;
 };
 
 struct js_arraybuffer_attachment_s {
@@ -604,20 +606,38 @@ js__arraybuffer_header(void *buffer) {
 
 static uint8_t *
 js__on_arraybuffer_allocate(jerry_arraybuffer_type_t type, uint32_t len, void **data, void *opaque) {
-  uint8_t *buffer;
+  js_arraybuffer_header_t *header = malloc(sizeof(js_arraybuffer_header_t) + len);
 
-  if (type == JERRY_ARRAYBUFFER_TYPE_SHARED_ARRAYBUFFER) {
-    js_arraybuffer_header_t *header = malloc(sizeof(js_arraybuffer_header_t) + len);
+  if (header == NULL) return NULL;
 
-    header->references = 1;
-    header->len = len;
+  header->references = 1;
+  header->len = len;
 
-    buffer = header->data;
-  } else {
-    buffer = malloc(len);
+  return header->data;
+}
+
+static void
+js__release_arraybuffer_header(uint8_t *buffer) {
+  js_arraybuffer_header_t *header = js__arraybuffer_header(buffer);
+
+  if (--header->references == 0) {
+    free(header);
+  }
+}
+
+static void
+js__release_backing_store(js_env_t *env, js_arraybuffer_backing_store_t *backing_store) {
+  if (--backing_store->references > 0) return;
+
+  if (backing_store->external) {
+    if (backing_store->finalize_cb) {
+      backing_store->finalize_cb(env, backing_store->data, backing_store->finalize_hint);
+    }
+  } else if (backing_store->data) {
+    js__release_arraybuffer_header(backing_store->data);
   }
 
-  return buffer;
+  free(backing_store);
 }
 
 static void
@@ -625,15 +645,7 @@ js__on_arraybuffer_free(jerry_arraybuffer_type_t type, uint8_t *buffer, uint32_t
   js_arraybuffer_attachment_t *attachment = data;
 
   if (attachment == NULL) {
-    if (type == JERRY_ARRAYBUFFER_TYPE_SHARED_ARRAYBUFFER) {
-      js_arraybuffer_header_t *header = js__arraybuffer_header(buffer);
-
-      if (--header->references == 0) {
-        free(header);
-      }
-    } else {
-      free(buffer);
-    }
+    js__release_arraybuffer_header(buffer);
 
     return;
   }
@@ -649,19 +661,9 @@ js__on_arraybuffer_free(jerry_arraybuffer_type_t type, uint8_t *buffer, uint32_t
     break;
   }
 
-  case js_arraybuffer_backing_store: {
-    js_arraybuffer_backing_store_t *backing_store = attachment->backing_store;
-
-    if (--backing_store->references == 0) {
-      jerry_value_free(backing_store->owner);
-
-      if (env->destroying) jerry_heap_gc(JERRY_GC_PRESSURE_LOW);
-
-      free(backing_store);
-    }
-
+  case js_arraybuffer_backing_store:
+    js__release_backing_store(env, attachment->backing_store);
     break;
-  }
   }
 
   free(attachment);
@@ -803,7 +805,9 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
 
   jerry_arraybuffer_allocator(js__on_arraybuffer_allocate, js__on_arraybuffer_free, env);
 
-  jerry_arraybuffer_heap_allocation_limit(64);
+  // Buffers kept in the engine heap cannot outlive the environment, which the
+  // memory behind a backing store must be able to.
+  jerry_arraybuffer_heap_allocation_limit(0);
 
   jerry_promise_on_event(JERRY_PROMISE_EVENT_FILTER_ERROR, js__on_promise_event, env);
 
@@ -3923,6 +3927,76 @@ js_get_promise_result(js_env_t *env, js_value_t *promise, js_value_t **result) {
   return 0;
 }
 
+static js_arraybuffer_attachment_t *
+js__attach_backing_store(js_arraybuffer_backing_store_t *backing_store) {
+  js_arraybuffer_attachment_t *attachment = malloc(sizeof(js_arraybuffer_attachment_t));
+
+  attachment->type = js_arraybuffer_backing_store;
+  attachment->backing_store = backing_store;
+
+  backing_store->references++;
+
+  return attachment;
+}
+
+static js_arraybuffer_backing_store_t *
+js__get_backing_store(jerry_value_t value) {
+  uint8_t *data = jerry_arraybuffer_data(value);
+  jerry_length_t len = jerry_arraybuffer_size(value);
+
+  js_arraybuffer_backing_store_t *backing_store;
+
+  if (data == NULL || len == 0) {
+    backing_store = malloc(sizeof(js_arraybuffer_backing_store_t));
+
+    backing_store->references = 1;
+    backing_store->len = 0;
+    backing_store->data = NULL;
+    backing_store->external = false;
+
+    return backing_store;
+  }
+
+  js_arraybuffer_attachment_t *attachment = jerry_arraybuffer_user_data(value);
+
+  if (attachment == NULL) {
+    backing_store = malloc(sizeof(js_arraybuffer_backing_store_t));
+
+    backing_store->references = 1;
+    backing_store->len = len;
+    backing_store->data = data;
+    backing_store->external = false;
+
+    js__arraybuffer_header(data)->references++;
+
+    return backing_store;
+  }
+
+  // The finalizer of an external buffer moves to a backing store that the
+  // buffer then shares, so that the memory outlives the buffer.
+  if (attachment->type == js_arraybuffer_finalizer) {
+    js_finalizer_t finalizer = attachment->finalizer;
+
+    backing_store = malloc(sizeof(js_arraybuffer_backing_store_t));
+
+    backing_store->references = 1;
+    backing_store->len = len;
+    backing_store->data = data;
+    backing_store->external = true;
+    backing_store->finalize_cb = finalizer.cb;
+    backing_store->finalize_hint = finalizer.hint;
+
+    attachment->type = js_arraybuffer_backing_store;
+    attachment->backing_store = backing_store;
+  } else {
+    backing_store = attachment->backing_store;
+  }
+
+  backing_store->references++;
+
+  return backing_store;
+}
+
 int
 js_create_arraybuffer(js_env_t *env, size_t len, void **data, js_value_t **result) {
   if (env->exception) return js__error(env);
@@ -3955,18 +4029,19 @@ js_create_arraybuffer_with_backing_store(js_env_t *env, js_arraybuffer_backing_s
 
   js__enter(env);
 
-  backing_store->references++;
-
   if (data) *data = backing_store->data;
 
   if (len) *len = backing_store->len;
 
-  js_arraybuffer_attachment_t *attachment = malloc(sizeof(js_arraybuffer_attachment_t));
+  jerry_value_t value;
 
-  attachment->type = js_arraybuffer_backing_store;
-  attachment->backing_store = backing_store;
+  if (backing_store->data) {
+    value = jerry_arraybuffer_external(backing_store->data, backing_store->len, js__attach_backing_store(backing_store));
+  } else {
+    value = jerry_arraybuffer(0);
+  }
 
-  *result = js__value_to_abi(jerry_arraybuffer_external(backing_store->data, backing_store->len, attachment));
+  *result = js__value_to_abi(value);
 
   js__attach_to_handle_scope(env, env->scope, *result);
 
@@ -4019,14 +4094,7 @@ js_get_arraybuffer_backing_store(js_env_t *env, js_value_t *arraybuffer, js_arra
 
   js__enter(env);
 
-  js_arraybuffer_backing_store_t *backing_store = malloc(sizeof(js_arraybuffer_backing_store_t));
-
-  backing_store->owner = jerry_value_copy(js__value_from_abi(arraybuffer));
-  backing_store->references = 1;
-  backing_store->len = jerry_arraybuffer_size(js__value_from_abi(arraybuffer));
-  backing_store->data = jerry_arraybuffer_data(js__value_from_abi(arraybuffer));
-
-  *result = backing_store;
+  *result = js__get_backing_store(js__value_from_abi(arraybuffer));
 
   return 0;
 }
@@ -4067,11 +4135,13 @@ js_create_sharedarraybuffer_with_backing_store(js_env_t *env, js_arraybuffer_bac
 
   if (len) *len = backing_store->len;
 
-  jerry_value_t value = jerry_shared_arraybuffer_external(backing_store->data, backing_store->len, NULL);
+  jerry_value_t value;
 
-  js_arraybuffer_header_t *header = js__arraybuffer_header(backing_store->data);
-
-  header->references++;
+  if (backing_store->data) {
+    value = jerry_shared_arraybuffer_external(backing_store->data, backing_store->len, js__attach_backing_store(backing_store));
+  } else {
+    value = jerry_shared_arraybuffer(0);
+  }
 
   *result = js__value_to_abi(value);
 
@@ -4115,18 +4185,7 @@ js_get_sharedarraybuffer_backing_store(js_env_t *env, js_value_t *sharedarraybuf
 
   js__enter(env);
 
-  js_arraybuffer_backing_store_t *backing_store = malloc(sizeof(js_arraybuffer_backing_store_t));
-
-  backing_store->owner = 0;
-  backing_store->references = 1;
-  backing_store->len = jerry_arraybuffer_size(js__value_from_abi(sharedarraybuffer));
-  backing_store->data = jerry_arraybuffer_data(js__value_from_abi(sharedarraybuffer));
-
-  js_arraybuffer_header_t *header = js__arraybuffer_header(backing_store->data);
-
-  header->references++;
-
-  *result = backing_store;
+  *result = js__get_backing_store(js__value_from_abi(sharedarraybuffer));
 
   return 0;
 }
@@ -4137,19 +4196,7 @@ js_release_arraybuffer_backing_store(js_env_t *env, js_arraybuffer_backing_store
 
   js__enter(env);
 
-  if (--backing_store->references == 0) {
-    if (backing_store->owner) {
-      jerry_value_free(backing_store->owner);
-    } else {
-      js_arraybuffer_header_t *header = js__arraybuffer_header(backing_store->data);
-
-      if (--header->references == 0) {
-        free(header);
-      }
-    }
-
-    free(backing_store);
-  }
+  js__release_backing_store(env, backing_store);
 
   return 0;
 }

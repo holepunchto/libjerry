@@ -1,0 +1,60 @@
+diff --git a/jerry-core/api/jerryscript.c b/jerry-core/api/jerryscript.c
+index 248f1c5..b150eb9 100644
+--- a/jerry-core/api/jerryscript.c
++++ b/jerry-core/api/jerryscript.c
+@@ -6379,6 +6379,43 @@ jerry_arraybuffer_has_buffer (const jerry_value_t value) /**< array buffer or ty
+ #endif /* JERRY_BUILTIN_TYPEDARRAY */
+ } /* jerry_arraybuffer_has_buffer */
+ 
++/**
++ * Get the user pointer of an array buffer backed by an external buffer.
++ *
++ * @return user pointer - if the array buffer is backed by an external buffer
++ *         NULL - otherwise
++ */
++void *
++jerry_arraybuffer_user_data (const jerry_value_t value) /**< array buffer value */
++{
++  jerry_assert_api_enabled ();
++
++#if JERRY_BUILTIN_TYPEDARRAY
++  if (!ecma_is_value_object (value))
++  {
++    return NULL;
++  }
++
++  ecma_object_t *object_p = ecma_get_object_from_value (value);
++
++  if (!(ecma_object_class_is (object_p, ECMA_OBJECT_CLASS_ARRAY_BUFFER)
++        || ecma_object_is_shared_arraybuffer (object_p)))
++  {
++    return NULL;
++  }
++
++  if (!(ECMA_ARRAYBUFFER_GET_FLAGS (object_p) & ECMA_ARRAYBUFFER_HAS_POINTER))
++  {
++    return NULL;
++  }
++
++  return ((ecma_arraybuffer_pointer_t *) object_p)->arraybuffer_user_p;
++#else /* !JERRY_BUILTIN_TYPEDARRAY */
++  JERRY_UNUSED (value);
++  return NULL;
++#endif /* JERRY_BUILTIN_TYPEDARRAY */
++} /* jerry_arraybuffer_user_data */
++
+ /**
+  * Array buffers which size is less or equal than the limit passed to this function are allocated in
+  * a single memory block. The allocator callbacks set by jerry_arraybuffer_set_allocation_callbacks
+diff --git a/jerry-core/include/jerryscript-core.h b/jerry-core/include/jerryscript-core.h
+index b65a509..45bce2e 100644
+--- a/jerry-core/include/jerryscript-core.h
++++ b/jerry-core/include/jerryscript-core.h
+@@ -714,6 +714,7 @@ jerry_size_t jerry_arraybuffer_size (const jerry_value_t value);
+ uint8_t *jerry_arraybuffer_data (const jerry_value_t value);
+ bool jerry_arraybuffer_is_detachable (const jerry_value_t value);
+ bool jerry_arraybuffer_has_buffer (const jerry_value_t value);
++void *jerry_arraybuffer_user_data (const jerry_value_t value);
+ /**
+  * jerry-api-arraybuffer-get @}
+  */
