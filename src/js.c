@@ -4059,16 +4059,24 @@ js_create_external_arraybuffer(js_env_t *env, void *data, size_t len, js_finaliz
 
   js__enter(env);
 
-  js_arraybuffer_attachment_t *attachment = malloc(sizeof(js_arraybuffer_attachment_t));
+  js_arraybuffer_attachment_t *attachment = NULL;
 
-  attachment->type = js_arraybuffer_finalizer;
+  // JerryScript drops the user pointer of an empty ArrayBuffer, so finalize
+  // immediately as there is nothing for the ArrayBuffer to keep alive.
+  if (len == 0) {
+    if (finalize_cb) finalize_cb(env, data, finalize_hint);
+  } else {
+    attachment = malloc(sizeof(js_arraybuffer_attachment_t));
 
-  js_finalizer_t *finalizer = &attachment->finalizer;
+    attachment->type = js_arraybuffer_finalizer;
 
-  finalizer->env = env;
-  finalizer->data = data;
-  finalizer->cb = finalize_cb;
-  finalizer->hint = finalize_hint;
+    js_finalizer_t *finalizer = &attachment->finalizer;
+
+    finalizer->env = env;
+    finalizer->data = data;
+    finalizer->cb = finalize_cb;
+    finalizer->hint = finalize_hint;
+  }
 
   *result = js__value_to_abi(jerry_arraybuffer_external(data, len, attachment));
 
@@ -4161,16 +4169,24 @@ js_create_external_sharedarraybuffer(js_env_t *env, void *data, size_t len, js_f
 
   js__enter(env);
 
-  js_arraybuffer_attachment_t *attachment = malloc(sizeof(js_arraybuffer_attachment_t));
+  js_arraybuffer_attachment_t *attachment = NULL;
 
-  attachment->type = js_arraybuffer_finalizer;
+  // JerryScript drops the user pointer of an empty SharedArrayBuffer, so finalize
+  // immediately as there is nothing for the SharedArrayBuffer to keep alive.
+  if (len == 0) {
+    if (finalize_cb) finalize_cb(env, data, finalize_hint);
+  } else {
+    attachment = malloc(sizeof(js_arraybuffer_attachment_t));
 
-  js_finalizer_t *finalizer = &attachment->finalizer;
+    attachment->type = js_arraybuffer_finalizer;
 
-  finalizer->env = env;
-  finalizer->data = data;
-  finalizer->cb = finalize_cb;
-  finalizer->hint = finalize_hint;
+    js_finalizer_t *finalizer = &attachment->finalizer;
+
+    finalizer->env = env;
+    finalizer->data = data;
+    finalizer->cb = finalize_cb;
+    finalizer->hint = finalize_hint;
+  }
 
   *result = js__value_to_abi(jerry_shared_arraybuffer_external(data, len, attachment));
 
@@ -5130,6 +5146,11 @@ js_get_global(js_env_t *env, js_value_t **result) {
   js__attach_to_handle_scope(env, env->scope, *result);
 
   return 0;
+}
+
+int
+js_get_object_global(js_env_t *env, js_value_t *object, js_value_t **result) {
+  return js_get_null(env, result);
 }
 
 int
