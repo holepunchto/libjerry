@@ -109,6 +109,7 @@ struct js_env_s {
   int64_t external_memory;
 
   bool destroying;
+  bool terminating;
 
   js_promise_rejection_t *promise_rejections;
 
@@ -497,6 +498,8 @@ js__uncaught_exception(js_env_t *env, jerry_value_t exception) {
   if (jerry_value_is_abort(exception)) {
     jerry_value_free(exception);
 
+    env->terminating = false;
+
     return;
   }
 
@@ -537,7 +540,7 @@ js__unhandled_rejection(js_env_t *env, jerry_value_t promise, jerry_value_t reas
       env,
       js__value_to_abi(reason),
       js__value_to_abi(promise),
-      env->callbacks.uncaught_exception_data
+      env->callbacks.unhandled_rejection_data
     );
 
     err = js_close_handle_scope(env, scope);
@@ -551,6 +554,9 @@ js__unhandled_rejection(js_env_t *env, jerry_value_t promise, jerry_value_t reas
 static inline void
 js__run_microtasks(js_env_t *env) {
   int err;
+
+  // Terminating execution skips the checkpoint, leaving the microtasks queued.
+  if (env->terminating) return;
 
   env->depth++;
 
@@ -581,6 +587,18 @@ js__run_microtasks(js_env_t *env) {
   env->promise_rejections = NULL;
 
   while (next) {
+    if (env->exception) {
+      // An exception thrown by a handler is left pending, so the rejections
+      // not yet reported are left for a later checkpoint.
+      js_promise_rejection_t **tail = &env->promise_rejections;
+
+      while (*tail) tail = &(*tail)->next;
+
+      *tail = next;
+
+      break;
+    }
+
     js__unhandled_rejection(env, next->promise, next->reason);
 
     prev = next;
@@ -746,6 +764,19 @@ js__close_env(js_env_t *env) {
 
   js__finalize_objects(env);
 
+  js_promise_rejection_t *rejection = env->promise_rejections;
+
+  while (rejection) {
+    js_promise_rejection_t *next = rejection->next;
+
+    jerry_value_free(rejection->promise);
+    jerry_value_free(rejection->reason);
+
+    free(rejection);
+
+    rejection = next;
+  }
+
   intrusive_list_for_each(next, &env->deferreds) {
     js_deferred_t *deferred = intrusive_entry(next, js_deferred_t, list);
 
@@ -831,6 +862,7 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   env->external_memory = 0;
 
   env->destroying = false;
+  env->terminating = false;
 
   env->promise_rejections = NULL;
 
@@ -3629,7 +3661,7 @@ js_create_external(js_env_t *env, void *data, js_finalize_cb finalize_cb, void *
 
 int
 js_create_date(js_env_t *env, double time, js_value_t **result) {
-  // Allow continuing even with a pending exception
+  if (env->exception) return js__error(env);
 
   js__enter(env);
 
@@ -3649,6 +3681,25 @@ js_create_date(js_env_t *env, double time, js_value_t **result) {
   return 0;
 }
 
+// The code of an error is its own property, so it is defined rather than set
+// to keep setters on the prototype chain from running.
+static inline void
+js__define_error_code(jerry_value_t error, jerry_value_t code) {
+  jerry_property_descriptor_t descriptor = {
+    JERRY_PROP_IS_VALUE_DEFINED | JERRY_PROP_IS_WRITABLE_DEFINED | JERRY_PROP_IS_WRITABLE | JERRY_PROP_IS_ENUMERABLE_DEFINED | JERRY_PROP_IS_ENUMERABLE | JERRY_PROP_IS_CONFIGURABLE_DEFINED | JERRY_PROP_IS_CONFIGURABLE,
+    code,
+  };
+
+  jerry_value_t key = jerry_string_sz("code");
+
+  jerry_value_t result = jerry_object_define_own_prop(error, key, &descriptor);
+
+  assert(!jerry_value_is_exception(result));
+
+  jerry_value_free(result);
+  jerry_value_free(key);
+}
+
 int
 js_create_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t **result) {
   // Allow continuing even with a pending exception
@@ -3657,23 +3708,7 @@ js_create_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t
 
   jerry_value_t error = jerry_error(JERRY_ERROR_COMMON, js__value_from_abi(message));
 
-  if (code) {
-    jerry_value_t exception = jerry_object_set_sz(error, "code", js__value_from_abi(code));
-
-    if (jerry_value_is_exception(exception)) {
-      jerry_value_free(error);
-
-      if (env->depth) {
-        env->exception = exception;
-      } else {
-        js__uncaught_exception(env, exception);
-      }
-
-      return js__error(env);
-    }
-
-    jerry_value_free(exception);
-  }
+  if (code) js__define_error_code(error, js__value_from_abi(code));
 
   *result = js__value_to_abi(error);
 
@@ -3690,23 +3725,7 @@ js_create_type_error(js_env_t *env, js_value_t *code, js_value_t *message, js_va
 
   jerry_value_t error = jerry_error(JERRY_ERROR_TYPE, js__value_from_abi(message));
 
-  if (code) {
-    jerry_value_t exception = jerry_object_set_sz(error, "code", js__value_from_abi(code));
-
-    if (jerry_value_is_exception(exception)) {
-      jerry_value_free(error);
-
-      if (env->depth) {
-        env->exception = exception;
-      } else {
-        js__uncaught_exception(env, exception);
-      }
-
-      return js__error(env);
-    }
-
-    jerry_value_free(exception);
-  }
+  if (code) js__define_error_code(error, js__value_from_abi(code));
 
   *result = js__value_to_abi(error);
 
@@ -3723,23 +3742,7 @@ js_create_range_error(js_env_t *env, js_value_t *code, js_value_t *message, js_v
 
   jerry_value_t error = jerry_error(JERRY_ERROR_RANGE, js__value_from_abi(message));
 
-  if (code) {
-    jerry_value_t exception = jerry_object_set_sz(error, "code", js__value_from_abi(code));
-
-    if (jerry_value_is_exception(exception)) {
-      jerry_value_free(error);
-
-      if (env->depth) {
-        env->exception = exception;
-      } else {
-        js__uncaught_exception(env, exception);
-      }
-
-      return js__error(env);
-    }
-
-    jerry_value_free(exception);
-  }
+  if (code) js__define_error_code(error, js__value_from_abi(code));
 
   *result = js__value_to_abi(error);
 
@@ -3756,23 +3759,7 @@ js_create_syntax_error(js_env_t *env, js_value_t *code, js_value_t *message, js_
 
   jerry_value_t error = jerry_error(JERRY_ERROR_SYNTAX, js__value_from_abi(message));
 
-  if (code) {
-    jerry_value_t exception = jerry_object_set_sz(error, "code", js__value_from_abi(code));
-
-    if (jerry_value_is_exception(exception)) {
-      jerry_value_free(error);
-
-      if (env->depth) {
-        env->exception = exception;
-      } else {
-        js__uncaught_exception(env, exception);
-      }
-
-      return js__error(env);
-    }
-
-    jerry_value_free(exception);
-  }
+  if (code) js__define_error_code(error, js__value_from_abi(code));
 
   *result = js__value_to_abi(error);
 
@@ -3789,23 +3776,7 @@ js_create_reference_error(js_env_t *env, js_value_t *code, js_value_t *message, 
 
   jerry_value_t error = jerry_error(JERRY_ERROR_REFERENCE, js__value_from_abi(message));
 
-  if (code) {
-    jerry_value_t exception = jerry_object_set_sz(error, "code", js__value_from_abi(code));
-
-    if (jerry_value_is_exception(exception)) {
-      jerry_value_free(error);
-
-      if (env->depth) {
-        env->exception = exception;
-      } else {
-        js__uncaught_exception(env, exception);
-      }
-
-      return js__error(env);
-    }
-
-    jerry_value_free(exception);
-  }
+  if (code) js__define_error_code(error, js__value_from_abi(code));
 
   *result = js__value_to_abi(error);
 
@@ -3829,7 +3800,7 @@ js_get_error_location(js_env_t *env, js_value_t *error, js_error_location_t *res
 
 int
 js_create_promise(js_env_t *env, js_deferred_t **deferred, js_value_t **promise) {
-  // Allow continuing even with a pending exception
+  if (env->exception) return js__error(env);
 
   js__enter(env);
 
@@ -3850,11 +3821,17 @@ js_create_promise(js_env_t *env, js_deferred_t **deferred, js_value_t **promise)
 
 int
 js_resolve_deferred(js_env_t *env, js_deferred_t *deferred, js_value_t *resolution) {
-  // Allow continuing even with a pending exception
+  if (env->exception) return js__error(env);
 
   js__enter(env);
 
+  // Resolving with a thenable reads its `then` property, which may run
+  // JavaScript.
+  env->depth++;
+
   jerry_value_free(jerry_promise_resolve(deferred->promise, js__value_from_abi(resolution)));
+
+  env->depth--;
 
   intrusive_list_remove(&env->deferreds, &deferred->list);
 
@@ -3869,11 +3846,17 @@ js_resolve_deferred(js_env_t *env, js_deferred_t *deferred, js_value_t *resoluti
 
 int
 js_reject_deferred(js_env_t *env, js_deferred_t *deferred, js_value_t *resolution) {
-  // Allow continuing even with a pending exception
+  if (env->exception) return js__error(env);
 
   js__enter(env);
 
+  // Resolving with a thenable reads its `then` property, which may run
+  // JavaScript.
+  env->depth++;
+
   jerry_value_free(jerry_promise_reject(deferred->promise, js__value_from_abi(resolution)));
+
+  env->depth--;
 
   intrusive_list_remove(&env->deferreds, &deferred->list);
 
@@ -4319,7 +4302,13 @@ js_coerce_to_number(js_env_t *env, js_value_t *value, js_value_t **result) {
 
   js__enter(env);
 
+  env->depth++;
+
   jerry_value_t number = jerry_value_to_number(js__value_from_abi(value));
+
+  if (env->depth == 1) js__run_microtasks(env);
+
+  env->depth--;
 
   if (jerry_value_is_exception(number)) {
     if (env->depth) {
@@ -4344,7 +4333,13 @@ js_coerce_to_string(js_env_t *env, js_value_t *value, js_value_t **result) {
 
   js__enter(env);
 
+  env->depth++;
+
   jerry_value_t string = jerry_value_to_string(js__value_from_abi(value));
+
+  if (env->depth == 1) js__run_microtasks(env);
+
+  env->depth--;
 
   if (jerry_value_is_exception(string)) {
     if (env->depth) {
@@ -4369,7 +4364,13 @@ js_coerce_to_object(js_env_t *env, js_value_t *value, js_value_t **result) {
 
   js__enter(env);
 
+  env->depth++;
+
   jerry_value_t object = jerry_value_to_object(js__value_from_abi(value));
+
+  if (env->depth == 1) js__run_microtasks(env);
+
+  env->depth--;
 
   if (jerry_value_is_exception(object)) {
     if (env->depth) {
@@ -4883,6 +4884,17 @@ js_is_detached_arraybuffer(js_env_t *env, js_value_t *value, bool *result) {
   js__enter(env);
 
   *result = jerry_value_is_arraybuffer(js__value_from_abi(value)) && jerry_arraybuffer_data(js__value_from_abi(value)) == NULL;
+
+  return 0;
+}
+
+int
+js_is_detachable_arraybuffer(js_env_t *env, js_value_t *value, bool *result) {
+  // Allow continuing even with a pending exception
+
+  js__enter(env);
+
+  *result = jerry_value_is_arraybuffer(js__value_from_abi(value));
 
   return 0;
 }
@@ -6388,7 +6400,7 @@ js__queue_microtask(js_env_t *env, jerry_value_t function) {
 
 int
 js_queue_microtask(js_env_t *env, js_value_t *function) {
-  // Allow continuing even with a pending exception
+  if (env->exception) return js__error(env);
 
   js__enter(env);
 
@@ -6424,6 +6436,17 @@ js__on_microtask_call(const jerry_call_info_t *info, const jerry_value_t argv[],
 
   task->cb(env, task->data);
 
+  // A microtask is not part of the call that queued it, so nothing is there to
+  // receive its exceptions. Returning them would only reject the promise the
+  // task was queued on, so report them as uncaught instead.
+  if (env->exception) {
+    jerry_value_t exception = env->exception;
+
+    env->exception = 0;
+
+    js__uncaught_exception(env, exception);
+  }
+
   err = js_close_handle_scope(env, scope);
   assert(err == 0);
 
@@ -6434,7 +6457,7 @@ js__on_microtask_call(const jerry_call_info_t *info, const jerry_value_t argv[],
 
 int
 js_queue_microtask_with_callback(js_env_t *env, js_task_cb cb, void *data) {
-  // Allow continuing even with a pending exception
+  if (env->exception) return js__error(env);
 
   js__enter(env);
 
@@ -6520,6 +6543,14 @@ js_call_function_with_checkpoint(js_env_t *env, js_value_t *receiver, js_value_t
   js__run_microtasks(env);
 
   env->depth--;
+
+  // The call itself may have succeeded with the exception thrown at the
+  // checkpoint after it, but the caller must still see it.
+  if (env->exception) {
+    jerry_value_free(value);
+
+    return js__error(env);
+  }
 
   if (jerry_value_is_exception(value)) {
     if (env->depth) {
@@ -6924,6 +6955,26 @@ int
 js_add_teardown_callback(js_env_t *env, js_teardown_cb callback, void *data) {
   if (env->exception) return js__error(env);
 
+  int err;
+
+  if (env->destroying) {
+    err = js_throw_error(env, NULL, "Teardown queue has already drained");
+    assert(err == 0);
+
+    return js__error(env);
+  }
+
+  intrusive_list_for_each(next, &env->teardown_queue.tasks) {
+    js_teardown_task_t *task = intrusive_entry(next, js_teardown_task_t, list);
+
+    if (task->type == js_immediate_teardown && task->immediate.cb == callback && task->data == data) {
+      err = js_throw_error(env, NULL, "Teardown callback has already been registered");
+      assert(err == 0);
+
+      return js__error(env);
+    }
+  }
+
   js_teardown_task_t *task = malloc(sizeof(js_teardown_task_t));
 
   task->type = js_immediate_teardown;
@@ -6939,6 +6990,8 @@ int
 js_remove_teardown_callback(js_env_t *env, js_teardown_cb callback, void *data) {
   if (env->exception) return js__error(env);
 
+  int err;
+
   if (env->destroying) return 0;
 
   intrusive_list_for_each(next, &env->teardown_queue.tasks) {
@@ -6953,12 +7006,35 @@ js_remove_teardown_callback(js_env_t *env, js_teardown_cb callback, void *data) 
     }
   }
 
-  return 0;
+  err = js_throw_error(env, NULL, "Teardown callback has not been registered");
+  assert(err == 0);
+
+  return js__error(env);
 }
 
 int
 js_add_deferred_teardown_callback(js_env_t *env, js_deferred_teardown_cb callback, void *data, js_deferred_teardown_t **result) {
   if (env->exception) return js__error(env);
+
+  int err;
+
+  if (env->destroying) {
+    err = js_throw_error(env, NULL, "Teardown queue has already drained");
+    assert(err == 0);
+
+    return js__error(env);
+  }
+
+  intrusive_list_for_each(next, &env->teardown_queue.tasks) {
+    js_teardown_task_t *task = intrusive_entry(next, js_teardown_task_t, list);
+
+    if (task->type == js_deferred_teardown && task->deferred.cb == callback && task->data == data) {
+      err = js_throw_error(env, NULL, "Teardown callback has already been registered");
+      assert(err == 0);
+
+      return js__error(env);
+    }
+  }
 
   js_teardown_task_t *task = malloc(sizeof(js_teardown_task_t));
 
@@ -7049,23 +7125,9 @@ js_throw_error(js_env_t *env, const char *code, const char *message) {
   if (code) {
     jerry_value_t value = jerry_string_sz(code);
 
-    jerry_value_t exception = jerry_object_set_sz(error, "code", value);
+    js__define_error_code(error, value);
 
     jerry_value_free(value);
-
-    if (jerry_value_is_exception(exception)) {
-      jerry_value_free(error);
-
-      if (env->depth) {
-        env->exception = exception;
-      } else {
-        js__uncaught_exception(env, exception);
-      }
-
-      return js__error(env);
-    }
-
-    jerry_value_free(exception);
   }
 
   env->exception = jerry_throw_value(error, true);
@@ -7118,23 +7180,9 @@ js_throw_type_error(js_env_t *env, const char *code, const char *message) {
   if (code) {
     jerry_value_t value = jerry_string_sz(code);
 
-    jerry_value_t exception = jerry_object_set_sz(error, "code", value);
+    js__define_error_code(error, value);
 
     jerry_value_free(value);
-
-    if (jerry_value_is_exception(exception)) {
-      jerry_value_free(error);
-
-      if (env->depth) {
-        env->exception = exception;
-      } else {
-        js__uncaught_exception(env, exception);
-      }
-
-      return js__error(env);
-    }
-
-    jerry_value_free(exception);
   }
 
   env->exception = jerry_throw_value(error, true);
@@ -7187,23 +7235,9 @@ js_throw_range_error(js_env_t *env, const char *code, const char *message) {
   if (code) {
     jerry_value_t value = jerry_string_sz(code);
 
-    jerry_value_t exception = jerry_object_set_sz(error, "code", value);
+    js__define_error_code(error, value);
 
     jerry_value_free(value);
-
-    if (jerry_value_is_exception(exception)) {
-      jerry_value_free(error);
-
-      if (env->depth) {
-        env->exception = exception;
-      } else {
-        js__uncaught_exception(env, exception);
-      }
-
-      return js__error(env);
-    }
-
-    jerry_value_free(exception);
   }
 
   env->exception = jerry_throw_value(error, true);
@@ -7256,23 +7290,9 @@ js_throw_syntax_error(js_env_t *env, const char *code, const char *message) {
   if (code) {
     jerry_value_t value = jerry_string_sz(code);
 
-    jerry_value_t exception = jerry_object_set_sz(error, "code", value);
+    js__define_error_code(error, value);
 
     jerry_value_free(value);
-
-    if (jerry_value_is_exception(exception)) {
-      jerry_value_free(error);
-
-      if (env->depth) {
-        env->exception = exception;
-      } else {
-        js__uncaught_exception(env, exception);
-      }
-
-      return js__error(env);
-    }
-
-    jerry_value_free(exception);
   }
 
   env->exception = jerry_throw_value(error, true);
@@ -7325,23 +7345,9 @@ js_throw_reference_error(js_env_t *env, const char *code, const char *message) {
   if (code) {
     jerry_value_t value = jerry_string_sz(code);
 
-    jerry_value_t exception = jerry_object_set_sz(error, "code", value);
+    js__define_error_code(error, value);
 
     jerry_value_free(value);
-
-    if (jerry_value_is_exception(exception)) {
-      jerry_value_free(error);
-
-      if (env->depth) {
-        env->exception = exception;
-      } else {
-        js__uncaught_exception(env, exception);
-      }
-
-      return js__error(env);
-    }
-
-    jerry_value_free(exception);
   }
 
   env->exception = jerry_throw_value(error, true);
@@ -7401,6 +7407,8 @@ js_get_and_clear_last_exception(js_env_t *env, js_value_t **result) {
   js_value_t *exception;
 
   if (env->exception) {
+    if (jerry_value_is_abort(env->exception)) env->terminating = false;
+
     exception = js__value_to_abi(jerry_exception_value(env->exception, true));
   } else {
     exception = js__value_to_abi(jerry_undefined());
@@ -7418,6 +7426,8 @@ js_get_and_clear_last_exception(js_env_t *env, js_value_t **result) {
 int
 js_fatal_exception(js_env_t *env, js_value_t *error) {
   // Allow continuing even with a pending exception
+
+  if (env->callbacks.uncaught_exception == NULL) return 0;
 
   js__enter(env);
 
@@ -7439,6 +7449,8 @@ js_terminate_execution(js_env_t *env) {
   jerry_value_free(env->exception);
 
   env->exception = jerry_throw_abort(jerry_error_sz(JERRY_ERROR_COMMON, "Execution terminated"), true);
+
+  env->terminating = true;
 
   return 0;
 }
