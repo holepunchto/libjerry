@@ -811,10 +811,7 @@ js__close_env(js_env_t *env) {
   while (rejection) {
     js_promise_rejection_t *next = rejection->next;
 
-    jerry_value_free(rejection->promise);
-    jerry_value_free(rejection->reason);
-
-    free(rejection);
+    js__free_promise_rejection(rejection);
 
     rejection = next;
   }
