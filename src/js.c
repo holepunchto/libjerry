@@ -103,6 +103,8 @@ struct js_env_s {
   jerry_value_t realm;
   jerry_value_t bindings;
   jerry_value_t exception;
+  jerry_value_t continuation;
+  js_continuation_scope_t *continuation_scope;
 
   jerry_value_t default_module_id;
 
@@ -127,6 +129,11 @@ struct js_env_s {
     js_dynamic_import_cb dynamic_import;
     void *dynamic_import_data;
   } callbacks;
+};
+
+struct js_continuation_scope_s {
+  js_continuation_scope_t *parent;
+  jerry_value_t previous;
 };
 
 struct js_env_scope_s {
@@ -259,6 +266,7 @@ struct js_arraybuffer_attachment_s {
 struct js_promise_rejection_s {
   jerry_value_t promise;
   jerry_value_t reason;
+  jerry_value_t continuation;
   js_promise_rejection_t *next;
 };
 
@@ -525,8 +533,29 @@ js__uncaught_exception(js_env_t *env, jerry_value_t exception) {
   }
 }
 
+// Swaps the continuation snapshot without touching reference counts, so the
+// caller keeps ownership of both values. This is also safe while the engine is
+// collecting garbage.
+static inline jerry_value_t
+js__swap_continuation_snapshot(js_env_t *env, jerry_value_t snapshot) {
+  jerry_value_t previous = env->continuation;
+
+  env->continuation = snapshot;
+
+  return previous;
+}
+
 static inline void
-js__unhandled_rejection(js_env_t *env, jerry_value_t promise, jerry_value_t reason) {
+js__free_promise_rejection(js_promise_rejection_t *rejection) {
+  jerry_value_free(rejection->promise);
+  jerry_value_free(rejection->reason);
+  jerry_value_free(rejection->continuation);
+
+  free(rejection);
+}
+
+static inline void
+js__unhandled_rejection(js_env_t *env, js_promise_rejection_t *rejection) {
   assert(env->exception == 0);
 
   int err;
@@ -536,19 +565,20 @@ js__unhandled_rejection(js_env_t *env, jerry_value_t promise, jerry_value_t reas
     err = js_open_handle_scope(env, &scope);
     assert(err == 0);
 
+    jerry_value_t previous = js__swap_continuation_snapshot(env, rejection->continuation);
+
     env->callbacks.unhandled_rejection(
       env,
-      js__value_to_abi(reason),
-      js__value_to_abi(promise),
+      js__value_to_abi(rejection->reason),
+      js__value_to_abi(rejection->promise),
       env->callbacks.unhandled_rejection_data
     );
+
+    js__swap_continuation_snapshot(env, previous);
 
     err = js_close_handle_scope(env, scope);
     assert(err == 0);
   }
-
-  jerry_value_free(promise);
-  jerry_value_free(reason);
 }
 
 static inline void
@@ -592,19 +622,21 @@ js__run_microtasks(js_env_t *env) {
       // not yet reported are left for a later checkpoint.
       js_promise_rejection_t **tail = &env->promise_rejections;
 
-      while (*tail) tail = &(*tail)->next;
+      while (*tail) {
+        tail = &(*tail)->next;
+      }
 
       *tail = next;
 
       break;
     }
 
-    js__unhandled_rejection(env, next->promise, next->reason);
+    js__unhandled_rejection(env, next);
 
     prev = next;
     next = next->next;
 
-    free(prev);
+    js__free_promise_rejection(prev);
 
     js__run_microtasks(env);
   }
@@ -615,6 +647,18 @@ js__run_microtasks(js_env_t *env) {
 static inline int
 js__error(js_env_t *env) {
   return env->exception ? js_pending_exception : js_uncaught_exception;
+}
+
+// Runs a finalize callback in the empty continuation snapshot, as the snapshot
+// that happens to be current when the engine collects an object is unrelated
+// to it.
+static inline void
+js__finalize(js_env_t *env, js_finalize_cb cb, void *data, void *hint) {
+  jerry_value_t previous = js__swap_continuation_snapshot(env, jerry_undefined());
+
+  cb(env, data, hint);
+
+  js__swap_continuation_snapshot(env, previous);
 }
 
 static inline js_arraybuffer_header_t *
@@ -649,7 +693,7 @@ js__release_backing_store(js_env_t *env, js_arraybuffer_backing_store_t *backing
 
   if (backing_store->external) {
     if (backing_store->finalize_cb) {
-      backing_store->finalize_cb(env, backing_store->data, backing_store->finalize_hint);
+      js__finalize(env, backing_store->finalize_cb, backing_store->data, backing_store->finalize_hint);
     }
   } else if (backing_store->data) {
     js__release_arraybuffer_header(backing_store->data);
@@ -674,7 +718,7 @@ js__on_arraybuffer_free(jerry_arraybuffer_type_t type, uint8_t *buffer, uint32_t
   case js_arraybuffer_finalizer: {
     js_finalizer_t *finalizer = &attachment->finalizer;
 
-    if (finalizer->cb) finalizer->cb(finalizer->env, finalizer->data, finalizer->hint);
+    if (finalizer->cb) js__finalize(finalizer->env, finalizer->cb, finalizer->data, finalizer->hint);
 
     break;
   }
@@ -700,6 +744,7 @@ js__on_promise_event(jerry_promise_event_type_t event_type, const jerry_value_t 
 
     node->promise = jerry_value_copy(promise);
     node->reason = jerry_value_copy(reason);
+    node->continuation = jerry_value_copy(env->continuation);
 
     node->next = env->promise_rejections;
 
@@ -710,13 +755,10 @@ js__on_promise_event(jerry_promise_event_type_t event_type, const jerry_value_t 
 
     while (next) {
       if (next->promise == promise) {
-        jerry_value_free(next->promise);
-        jerry_value_free(next->reason);
-
         if (prev) prev->next = next->next;
         else env->promise_rejections = next->next;
 
-        return free(next);
+        return js__free_promise_rejection(next);
       }
 
       prev = next;
@@ -769,10 +811,7 @@ js__close_env(js_env_t *env) {
   while (rejection) {
     js_promise_rejection_t *next = rejection->next;
 
-    jerry_value_free(rejection->promise);
-    jerry_value_free(rejection->reason);
-
-    free(rejection);
+    js__free_promise_rejection(rejection);
 
     rejection = next;
   }
@@ -790,6 +829,12 @@ js__close_env(js_env_t *env) {
   jerry_value_free(env->realm);
   jerry_value_free(env->bindings);
   jerry_value_free(env->exception);
+
+  while (env->continuation_scope) {
+    js_close_continuation_scope(env, env->continuation_scope);
+  }
+
+  jerry_value_free(env->continuation);
   jerry_value_free(env->default_module_id);
 
   jerry_cleanup();
@@ -858,6 +903,8 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   env->realm = jerry_current_realm();
   env->bindings = jerry_object();
   env->exception = 0;
+  env->continuation = jerry_undefined();
+  env->continuation_scope = NULL;
 
   env->external_memory = 0;
 
@@ -2499,7 +2546,7 @@ static void
 js__on_wrap_finalize(void *data, jerry_object_native_info_t *info) {
   js_finalizer_t *finalizer = data;
 
-  if (finalizer->cb) finalizer->cb(finalizer->env, finalizer->data, finalizer->hint);
+  if (finalizer->cb) js__finalize(finalizer->env, finalizer->cb, finalizer->data, finalizer->hint);
 
   free(finalizer);
 }
@@ -2589,7 +2636,7 @@ static void
 js__on_delegate_finalize(void *data, jerry_object_native_info_t *info) {
   js_delegate_t *delegate = data;
 
-  if (delegate->finalize_cb) delegate->finalize_cb(delegate->env, delegate->data, delegate->finalize_hint);
+  if (delegate->finalize_cb) js__finalize(delegate->env, delegate->finalize_cb, delegate->data, delegate->finalize_hint);
 
   free(delegate);
 }
@@ -2788,7 +2835,7 @@ js__on_finalizer_finalize(void *data, jerry_object_native_info_t *info) {
   while (next) {
     js_finalizer_t *finalizer = &next->finalizer;
 
-    if (finalizer->cb) finalizer->cb(finalizer->env, finalizer->data, finalizer->hint);
+    if (finalizer->cb) js__finalize(finalizer->env, finalizer->cb, finalizer->data, finalizer->hint);
 
     prev = next;
     next = next->next;
@@ -3569,7 +3616,7 @@ static void
 js__on_external_finalize(void *data, jerry_object_native_info_t *info) {
   js_finalizer_t *finalizer = data;
 
-  if (finalizer->cb) finalizer->cb(finalizer->env, finalizer->data, finalizer->hint);
+  if (finalizer->cb) js__finalize(finalizer->env, finalizer->cb, finalizer->data, finalizer->hint);
 
   free(finalizer);
 }
@@ -5143,6 +5190,150 @@ js_strict_equals(js_env_t *env, js_value_t *a, js_value_t *b, bool *result) {
   *result = jerry_value_to_boolean(value);
 
   jerry_value_free(value);
+
+  return 0;
+}
+
+int
+js_get_continuation_snapshot(js_env_t *env, js_value_t **result) {
+  // Allow continuing even with a pending exception
+
+  js__enter(env);
+
+  *result = js__value_to_abi(jerry_value_copy(env->continuation));
+
+  js__attach_to_handle_scope(env, env->scope, *result);
+
+  return 0;
+}
+
+// Snapshots are objects holding a non-writable data property per symbol, or
+// `undefined` when empty. Only own data properties are ever defined and read,
+// so no getter, setter, or other JavaScript can run.
+static jerry_value_t
+js__get_continuation_entry(jerry_value_t snapshot, jerry_value_t key) {
+  if (!jerry_value_is_object(snapshot)) return jerry_undefined();
+
+  return jerry_object_find_own(snapshot, key, snapshot, NULL);
+}
+
+static void
+js__set_continuation_entry(jerry_value_t snapshot, jerry_value_t key, jerry_value_t value) {
+  jerry_property_descriptor_t descriptor = {
+    .flags = JERRY_PROP_IS_VALUE_DEFINED,
+    .value = value,
+  };
+
+  jerry_value_free(jerry_object_define_own_prop(snapshot, key, &descriptor));
+}
+
+int
+js_get_continuation_variable(js_env_t *env, js_value_t *symbol, js_value_t **result) {
+  // Allow continuing even with a pending exception
+
+  js__enter(env);
+
+  *result = js__value_to_abi(js__get_continuation_entry(env->continuation, js__value_from_abi(symbol)));
+
+  js__attach_to_handle_scope(env, env->scope, *result);
+
+  return 0;
+}
+
+static jerry_value_t
+js__create_continuation_snapshot(jerry_value_t previous, jerry_value_t key, jerry_value_t value) {
+  jerry_value_t snapshot = jerry_object();
+
+  uint32_t len = 0;
+
+  if (jerry_value_is_object(previous)) {
+    jerry_value_t keys = jerry_object_property_names(previous, JERRY_PROPERTY_FILTER_EXCLUDE_STRINGS);
+
+    for (uint32_t i = 0, n = jerry_array_length(keys); i < n; i++) {
+      jerry_value_t other = jerry_object_get_index(keys, i);
+
+      if (other != key) {
+        jerry_value_t entry = js__get_continuation_entry(previous, other);
+
+        js__set_continuation_entry(snapshot, other, entry);
+
+        jerry_value_free(entry);
+
+        len++;
+      }
+
+      jerry_value_free(other);
+    }
+
+    jerry_value_free(keys);
+  }
+
+  if (!jerry_value_is_undefined(value)) {
+    js__set_continuation_entry(snapshot, key, value);
+
+    len++;
+  }
+
+  if (len == 0) {
+    jerry_value_free(snapshot);
+
+    return jerry_undefined();
+  }
+
+  return snapshot;
+}
+
+static void
+js__open_continuation_scope(js_env_t *env, jerry_value_t snapshot, js_continuation_scope_t **result) {
+  js_continuation_scope_t *scope = malloc(sizeof(js_continuation_scope_t));
+
+  scope->parent = env->continuation_scope;
+  scope->previous = env->continuation;
+
+  env->continuation = snapshot;
+  env->continuation_scope = scope;
+
+  *result = scope;
+}
+
+int
+js_open_continuation_scope(js_env_t *env, js_value_t *snapshot, js_continuation_scope_t **result) {
+  // Allow continuing even with a pending exception
+
+  js__enter(env);
+
+  js__open_continuation_scope(env, jerry_value_copy(js__value_from_abi(snapshot)), result);
+
+  return 0;
+}
+
+int
+js_open_continuation_variable_scope(js_env_t *env, js_value_t *symbol, js_value_t *value, js_continuation_scope_t **result) {
+  // Allow continuing even with a pending exception
+
+  js__enter(env);
+
+  jerry_value_t snapshot = js__create_continuation_snapshot(env->continuation, js__value_from_abi(symbol), js__value_from_abi(value));
+
+  js__open_continuation_scope(env, snapshot, result);
+
+  return 0;
+}
+
+int
+js_close_continuation_scope(js_env_t *env, js_continuation_scope_t *scope) {
+  // Allow continuing even with a pending exception
+
+  assert(env->continuation_scope == scope);
+
+  js__enter(env);
+
+  jerry_value_free(env->continuation);
+
+  env->continuation = scope->previous;
+  env->continuation_scope = scope->parent;
+
+  free(scope);
 
   return 0;
 }
