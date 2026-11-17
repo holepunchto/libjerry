@@ -40,6 +40,7 @@ add_library_targets(
     PRIVATE
       path::<TYPE>
       intrusive::headers
+    EMBED
       jerry-core
     STATIC
       uv_a
@@ -48,34 +49,6 @@ add_library_targets(
   EXPORT OFF
 )
 
-target_include_directories(
-  js_headers
-  INTERFACE
-    $<TARGET_PROPERTY:uv,INTERFACE_INCLUDE_DIRECTORIES>
-)
-
-target_sources(
-  js_static
-  PRIVATE
-    $<TARGET_OBJECTS:jerry-core>
-)
-
-if(TARGET js_shared)
-  target_sources(
-    js_shared
-    PRIVATE
-      $<TARGET_OBJECTS:jerry-core>
-  )
-endif()
-
 fetch_package("github:holepunchto/libjs" SOURCE_DIR js)
-
-target_sources(
-  js_headers
-  INTERFACE
-    FILE_SET HEADERS
-    BASE_DIRS ${js}/include
-    FILES ${js}/include/js.h
-)
 
 add_test_subdirectory(test)
