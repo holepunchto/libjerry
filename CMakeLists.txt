@@ -37,21 +37,15 @@ add_library_targets(
     src/js.c
   LINK
     utf::<TYPE>
-    path::<TYPE>
-  STATIC_LINK
-    jerry-core
-    uv_a
-  SHARED_LINK
-    jerry-core
-    uv
+    PRIVATE
+      path::<TYPE>
+      intrusive::headers
+      jerry-core
+    STATIC
+      uv_a
+    SHARED
+      uv
   EXPORT OFF
-)
-
-target_link_libraries(
-  js
-  PRIVATE
-    jerry-core
-    intrusive::headers
 )
 
 target_include_directories(
